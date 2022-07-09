@@ -724,6 +724,16 @@ export class Options extends EqItem {
         if (typeof this.data.clockMode === 'undefined') this.data.clockMode = 12;
         if (typeof this.data.adjustDST === 'undefined') this.data.adjustDST = true;
         if (typeof this.data.freezeThreshold === 'undefined') this.data.freezeThreshold = 35;
+        if (typeof this.data.pumpDelay === 'undefined') this.data.pumpDelay = false;
+        if (typeof this.data.valveDelayTime === 'undefined') this.data.valveDelayTime = 30;
+        // RKS: 12-04-21 If you are reading this in a few months delete the line below.
+        if (this.data.valveDelayTime > 1000) this.data.valveDelayTime = this.data.valveDelayTime / 1000;
+        if (typeof this.data.heaterStartDelay === 'undefined') this.data.heaterStartDelay = true;
+        if (typeof this.data.cleanerStartDelay === 'undefined') this.data.cleanerStartDelay = true;
+        if (typeof this.data.cleanerSolarDelay === 'undefined') this.data.cleanerSolarDelay = true;
+        if (typeof this.data.heaterStartDelayTime === 'undefined') this.data.heaterStartDelayTime = 10;
+        if (typeof this.data.cleanerStartDelayTime === 'undefined') this.data.cleanerStartDelayTime = 300; // 5min
+        if (typeof this.data.cleanerSolarDelayTime === 'undefined') this.data.cleanerSolarDelayTime = 300; // 5min
     }
     public get clockMode(): number | any { return this.data.clockMode; }
     public set clockMode(val: number | any) { this.setDataVal('clockMode', sys.board.valueMaps.clockModes.encode(val)); }
@@ -740,10 +750,25 @@ export class Options extends EqItem {
     public set manualHeat(val: boolean) { this.setDataVal('manualHeat', val); }
     public get pumpDelay(): boolean { return this.data.pumpDelay; }
     public set pumpDelay(val: boolean) { this.setDataVal('pumpDelay', val); }
+    public get valveDelayTime(): number { return this.data.valveDelayTime; }
+    public set valveDelayTime(val: number) { this.setDataVal('valveDelayTime', val); }
     public get cooldownDelay(): boolean { return this.data.cooldownDelay; }
     public set cooldownDelay(val: boolean) { this.setDataVal('cooldownDelay', val); }
     public get freezeThreshold(): number { return this.data.freezeThreshold; }
     public set freezeThreshold(val: number) { this.setDataVal('freezeThreshold', val); }
+    public get heaterStartDelay(): boolean { return this.data.heaterStartDelay; }
+    public set heaterStartDelay(val: boolean) { this.setDataVal('heaterStartDelay', val); }
+    public get heaterStartDelayTime(): number { return this.data.heaterStartDelayTime; }
+    public set heaterStartDelayTime(val: number) { this.setDataVal('heaterStartDelayTime', val); }
+
+    public get cleanerStartDelay(): boolean { return this.data.cleanerStartDelay; }
+    public set cleanerStartDelay(val: boolean) { this.setDataVal('cleanerStartDelay', val); }
+    public get cleanerStartDelayTime(): number { return this.data.cleanerStartDelayTime; }
+    public set cleanerStartDelayTime(val: number) { this.setDataVal('cleanerStartDelayTime', val); }
+    public get cleanerSolarDelay(): boolean { return this.data.cleanerSolarDelay; }
+    public set cleanerSolarDelay(val: boolean) { this.setDataVal('cleanerSolarDelay', val); }
+    public get cleanerSolarDelayTime(): number { return this.data.cleanerSolarDelayTime; }
+    public set cleanerSolarDelayTime(val: number) { this.setDataVal('cleanerSolarDelayTime', val); }
 
     //public get airTempAdj(): number { return typeof this.data.airTempAdj === 'undefined' ? 0 : this.data.airTempAdj; }
     //public set airTempAdj(val: number) { this.setDataVal('airTempAdj', val); }
@@ -1129,6 +1154,9 @@ export class EggTimer extends EqItem {
 }
 export class CircuitCollection extends EqItemCollection<Circuit> {
     constructor(data: any, name?: string) { super(data, name || "circuits"); }
+    public filter(f: (value: Circuit, index?: any, array?: any[]) => boolean): CircuitCollection {
+        return new CircuitCollection({ circuits: this.data.filter(f) });
+    }
     public createItem(data: any): Circuit { return new Circuit(data); }
     public add(obj: any): Circuit {
         this.data.push(obj);
@@ -1185,7 +1213,35 @@ export class Circuit extends EqItem implements ICircuit {
     public get deviceBinding(): string { return this.data.deviceBinding; }
     public set deviceBinding(val: string) { this.setDataVal('deviceBinding', val); }
     public get hasHeatSource() { return typeof sys.board.valueMaps.circuitFunctions.get(this.type || 0).hasHeatSource !== 'undefined' ? sys.board.valueMaps.circuitFunctions.get(this.type || 0).hasHeatSource : false };
-    public getLightThemes() { return sys.board.circuits.getLightThemes(this.type); }
+    public getLightThemes() {
+        // Lets do this universally driven by the metadata.
+        let cf = sys.board.valueMaps.circuitFunctions.transform(this.type);
+        if (cf.isLight && typeof cf.theme !== 'undefined') {
+            let arrThemes = sys.board.valueMaps.lightThemes.toArray();
+            let themes = [];
+            for (let i = 0; i < arrThemes.length; i++) {
+                let thm = arrThemes[i];
+                if (typeof thm.types !== 'undefined' && thm.types.length > 0 && thm.types.includes(cf.theme)) themes.push(thm);
+            }
+            return themes;
+        }
+        else return [];
+    }
+    public getLightCommands() {
+        // Lets do this universally driven by the metadata.
+        let cf = sys.board.valueMaps.circuitFunctions.transform(this.type);
+        if (cf.isLight && typeof cf.theme !== 'undefined') {
+            let arrCommands = sys.board.valueMaps.lightCommands.toArray();
+            let cmds = [];
+            for (let i = 0; i < arrCommands.length; i++) {
+                let cmd = arrCommands[i];
+                if (typeof cmd.types !== 'undefined' && cmd.types.length > 0 && cmd.types.includes(cf.theme)) cmds.push(cmd);
+            }
+            return cmds;
+        }
+        else return [];
+    }
+
     public static getIdName(id: number) {
         // todo: adjust for intellitouch
         let defName = "Aux" + (id + 1).toString();
@@ -1197,6 +1253,9 @@ export class Circuit extends EqItem implements ICircuit {
 }
 export class FeatureCollection extends EqItemCollection<Feature> {
     constructor(data: any, name?: string) { super(data, name || "features"); }
+    public filter(f: (value: Circuit, index?: any, array?: any[]) => boolean): FeatureCollection {
+        return new FeatureCollection({ features: this.data.filter(f) });
+    }
     public createItem(data: any): Feature { return new Feature(data); }
 }
 export class Feature extends EqItem implements ICircuit {
@@ -1206,6 +1265,7 @@ export class Feature extends EqItem implements ICircuit {
         if (typeof this.data.isActive === 'undefined') this.data.isActive = true;
         if (typeof this.data.eggTimer === 'undefined') this.data.eggTimer = 720;
         if (typeof this.data.showInFeatures === 'undefined') this.data.showInFeatures = true;
+        if (typeof this.data.master === 'undefined') this.data.master = sys.board.equipmentMaster; 
     }
     public dataName = 'featureConfig';
     public get id(): number { return this.data.id; }
@@ -1246,6 +1306,7 @@ export interface ICircuit {
     showInFeatures?: boolean;
     macro?: boolean;
     getLightThemes?: (type?: number) => {};
+    getLightCommands?: (type?: number) => {};
     get(copy?: boolean);
     master: number;
 }
@@ -1454,6 +1515,22 @@ export class Chlorinator extends EqItem {
 export class ValveCollection extends EqItemCollection<Valve> {
     constructor(data: any, name?: string) { super(data, name || "valves"); }
     public createItem(data: any): Valve { return new Valve(data); }
+    public getIntake(): Valve[] {
+        let valves = this.data.filter(x => x.isIntake === true);
+        let ret = [];
+        for (let i = 0; i < valves.length; i++) {
+            ret.push(this.getItemById(valves[i].id));
+        }
+        return ret;
+    }
+    public getReturn(): Valve[] {
+        let valves = this.data.filter(x => x.isReturn === true);
+        let ret = [];
+        for (let i = 0; i < valves.length; i++) {
+            ret.push(this.getItemById(valves[i].id));
+        }
+        return ret;
+    }
 }
 export class Valve extends EqItem {
     public dataName = 'valveConfig';
@@ -1491,6 +1568,22 @@ export class HeaterCollection extends EqItemCollection<Heater> {
         if (typeof itm !== 'undefined') return itm;
         if (typeof add !== 'undefined' && add) return this.add(data || { id: this.data.length + 1, address: address });
         return this.createItem(data || { id: this.data.length + 1, address: address });
+    }
+    public filter(f: (value: Heater, index?: any, array?: any[]) => boolean): HeaterCollection {
+        return new HeaterCollection({ heaters: this.data.filter(f) });
+    }
+
+    public getSolarHeaters(bodyId?: number): EqItemCollection<Heater> {
+        let htype = sys.board.valueMaps.heaterTypes.getValue('solar');
+        return new HeaterCollection(this.data.filter(x => {
+            if (x.type === htype) {
+                if (typeof bodyId !== 'undefined') {
+                    if (!x.isActive) return false;
+                    return (bodyId === x.body || (sys.equipment.shared && x.body === 32)) ? true : false;
+                }
+            }
+            return false;
+        }));
     }
 }
 export class Heater extends EqItem {
@@ -1664,7 +1757,61 @@ export class LightGroup extends EqItem implements ICircuitGroup, ICircuit {
     public get lightingTheme(): number | any { return this.data.lightingTheme; }
     public set lightingTheme(val: number | any) { this.setDataVal('lightingTheme', sys.board.valueMaps.lightThemes.encode(val)); }
     public get circuits(): LightGroupCircuitCollection { return new LightGroupCircuitCollection(this.data, "circuits"); }
-    public getLightThemes() { return sys.board.valueMaps.lightThemes.toArray(); }
+    public getLightThemes() {
+        // Go through the circuits and gather the themes.
+        // This method first looks at the circuits to determine their type (function)
+        // then it filters the list by the types associated with the circuits.  It does this because
+        // there can be combined ColorLogic and IntelliBrite lights.  The themes array has
+        // the circuit function.
+        let arrThemes = [];
+        for (let i = 0; i < this.circuits.length; i++) {
+            let circ = this.circuits.getItemByIndex(i);
+            let c = sys.circuits.getInterfaceById(circ.circuit);
+            let cf = sys.board.valueMaps.circuitFunctions.transform(c.type);
+            if (cf.isLight && typeof cf.theme !== 'undefined') {
+                if (!arrThemes.includes(cf.theme)) arrThemes.push(cf.theme);
+            }
+        }
+        // Alright now we need to get a listing of the themes.
+        let t = sys.board.valueMaps.lightThemes.toArray();
+        let ret = [];
+        for (let i = 0; i < t.length; i++) {
+            let thm = t[i];
+            if (typeof thm.types !== 'undefined' && thm.types.length > 0) {
+                // Look in the themes array of the theme.
+                if (arrThemes.some(x => thm.types.includes(x))) ret.push(thm);
+            }
+        }
+        return ret;
+    }
+    public getLightCommands() {
+        // Go through the circuits and gather the themes.
+        // This method first looks at the circuits to determine their type (function)
+        // then it filters the list by the types associated with the circuits.  It does this because
+        // there can be combined ColorLogic and IntelliBrite lights.  The themes array has
+        // the circuit function.
+        let arrThemes = [];
+        for (let i = 0; i < this.circuits.length; i++) {
+            let circ = this.circuits.getItemByIndex(i);
+            let c = sys.circuits.getInterfaceById(circ.circuit);
+            let cf = sys.board.valueMaps.circuitFunctions.transform(c.type);
+            if (cf.isLight && typeof cf.theme !== 'undefined') {
+                if (!arrThemes.includes(cf.theme)) arrThemes.push(cf.theme);
+            }
+        }
+        // Alright now we need to get a listing of the themes.
+        let t = sys.board.valueMaps.lightGroupCommands.toArray();
+        let ret = [];
+        for (let i = 0; i < t.length; i++) {
+            let cmd = t[i];
+            if (typeof cmd.types !== 'undefined' && cmd.types.length > 0) {
+                // Look in the themes array of the theme.
+                if (arrThemes.some(x => cmd.types.includes(x))) ret.push(cmd);
+            }
+        }
+        return ret;
+    }
+
     public getExtended() {
         let group = this.get(true);
         group.type = sys.board.valueMaps.circuitGroupTypes.transform(group.type);
@@ -1993,7 +2140,7 @@ export class ChemController extends EqItem {
     public getExtended() {
         let chem = this.get(true);
         chem.type = sys.board.valueMaps.chemControllerTypes.transform(this.type);
-        chem.siCalcType = sys.board.valueMaps.siCalcTypes.transform(this.type);
+        chem.siCalcType = sys.board.valueMaps.siCalcTypes.transform(this.siCalcType || 0);
         chem.body = sys.board.valueMaps.bodies.transform(this.body);
         chem.ph = this.ph.getExtended();
         chem.orp = this.orp.getExtended();
@@ -2038,11 +2185,14 @@ export class Chemical extends ChildEqItem {
         if (typeof this.data.flowReadingsOnly === 'undefined') this.data.flowReadingsOnly = true;
         if (typeof this.data.flowOnlyMixing === 'undefined') this.data.flowOnlyMixing = true;
         if (typeof this.data.maxDailyVolume === 'undefined') this.data.maxDailyVolume = 500;
+        if (typeof this.data.disableOnFreeze === 'undefined') this.data.disableOnFreeze = true;
         super.initData();
     }
     public get chemType(): string { return this.data.chemType; }
     public get enabled(): boolean { return utils.makeBool(this.data.enabled); }
     public set enabled(val: boolean) { this.setDataVal('enabled', val); }
+    public get disableOnFreeze(): boolean { return utils.makeBool(this.data.disableOnFreeze); }
+    public set disableOnFreeze(val: boolean) { this.setDataVal('disableOnFreeze', val); }
     public get maxDosingTime(): number { return this.data.maxDosingTime; }
     public set maxDosingTime(val: number) { this.setDataVal('maxDosingTime', val); }
     public get maxDosingVolume(): number { return this.data.maxDosingVolume; }
@@ -2083,6 +2233,7 @@ export class ChemicalPh extends Chemical {
         if (typeof this.data.acidType === 'undefined') this.data.acidType = 0;
         if (typeof this.data.tolerance === 'undefined') this.data.tolerance = { low: 7.2, high: 7.6, enabled: true };
         if (typeof this.data.dosePriority === 'undefined') this.data.dosePriority = true;
+        if (typeof this.data.doserType === 'undefined') this.data.doserType = 0;
         super.initData();
     }
     public get phSupply(): number | any { return this.data.phSupply; }
@@ -2091,11 +2242,14 @@ export class ChemicalPh extends Chemical {
     public set acidType(val: number | any) { this.setDataVal('acidType', sys.board.valueMaps.acidTypes.encode(val)); }
     public get dosePriority(): boolean { return this.data.dosePriority; }
     public set dosePriority(val: boolean) { this.setDataVal('dosePriority', val); }
+    public get doserType(): number | any { return this.data.doserType; }
+    public set doserType(val: number | any) { this.setDataVal('doserType', sys.board.valueMaps.phDoserTypes.encode(val)); }
     public get probe(): ChemicalPhProbe { return new ChemicalPhProbe(this.data, 'probe', this); }
     public getExtended() {
         let chem = super.getExtended();
         chem.probe = this.probe.getExtended();
         chem.phSupply = sys.board.valueMaps.phSupplyTypes.transform(this.phSupply);
+        chem.doserType = sys.board.valueMaps.phDoserTypes.transform(this.doserType);
         return chem;
     }
 }
@@ -2108,6 +2262,7 @@ export class ChemicalORP extends Chemical {
         if (typeof this.data.probe === 'undefined') this.data.probe = {};
         if (typeof this.data.tolerance === 'undefined') this.data.tolerance = { low: 650, high: 800, enabled: true };
         if (typeof this.data.phLockout === 'undefined') this.data.phLockout = 7.8;
+        if (typeof this.data.doserType === 'undefined') this.data.doserType = 0;
         super.initData();
     }
     public get useChlorinator(): boolean { return utils.makeBool(this.data.useChlorinator); }
@@ -2117,9 +2272,13 @@ export class ChemicalORP extends Chemical {
     public get probe(): ChemicalORPProbe { return new ChemicalORPProbe(this.data, 'probe', this); }
     public get chlorDosingMethod(): number | any { return this.data.chlorDosingMethod; }
     public set chlorDosingMethod(val: number | any) { this.setDataVal('chlorDosingMethod', sys.board.valueMaps.chemChlorDosingMethods.encode(val)); }
+    public get doserType(): number | any { return this.data.doserType; }
+    public set doserType(val: number | any) { this.setDataVal('doserType', sys.board.valueMaps.orpDoserTypes.encode(val)); }
+
     public getExtended() {
         let chem = super.getExtended();
         chem.probe = this.probe.getExtended();
+        chem.doserType = sys.board.valueMaps.orpDoserTypes.transform(this.doserType);
         return chem;
     }
 }

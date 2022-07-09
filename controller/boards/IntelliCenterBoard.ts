@@ -23,7 +23,7 @@ import { conn } from '../comms/Comms';
 import { logger } from '../../logger/Logger';
 import { state, ChlorinatorState, LightGroupState, VirtualCircuitState, ICircuitState, BodyTempState, CircuitGroupState, ICircuitGroupState, ChemControllerState } from '../State';
 import { utils } from '../../controller/Constants';
-import { InvalidEquipmentIdError, InvalidEquipmentDataError, EquipmentNotFoundError, MessageError } from '../Errors';
+import { InvalidEquipmentIdError, InvalidEquipmentDataError, EquipmentNotFoundError, MessageError, InvalidOperationError } from '../Errors';
 import { ncp } from '../nixie/Nixie';
 export class IntelliCenterBoard extends SystemBoard {
     public needsConfigChanges: boolean = false;
@@ -47,18 +47,18 @@ export class IntelliCenterBoard extends SystemBoard {
         this.valueMaps.circuitFunctions = new byteValueMap([
             [0, { name: 'generic', desc: 'Generic' }],
             [1, { name: 'spillway', desc: 'Spillway' }],
-            [2, { name: 'mastercleaner', desc: 'Master Cleaner' }],
+            [2, { name: 'mastercleaner', desc: 'Master Cleaner', body: 1 }],
             [3, { name: 'chemrelay', desc: 'Chem Relay' }],
             [4, { name: 'light', desc: 'Light', isLight: true }],
-            [5, { name: 'intellibrite', desc: 'Intellibrite', isLight: true }],
-            [6, { name: 'globrite', desc: 'GloBrite', isLight: true }],
+            [5, { name: 'intellibrite', desc: 'Intellibrite', isLight: true, theme: 'intellibrite' }],
+            [6, { name: 'globrite', desc: 'GloBrite', isLight: true, theme: 'intellibrite' }],
             [7, { name: 'globritewhite', desc: 'GloBrite White', isLight: true }],
-            [8, { name: 'magicstream', desc: 'Magicstream', isLight: true }],
+            [8, { name: 'magicstream', desc: 'Magicstream', isLight: true, theme: 'intellibrite' }],
             [9, { name: 'dimmer', desc: 'Dimmer', isLight: true }],
-            [10, { name: 'colorcascade', desc: 'ColorCascade', isLight: true }],
-            [11, { name: 'mastercleaner2', desc: 'Master Cleaner 2' }],
-            [12, { name: 'pool', desc: 'Pool', hasHeatSource: true }],
-            [13, { name: 'spa', desc: 'Spa', hasHeatSource: true }]
+            [10, { name: 'colorcascade', desc: 'ColorCascade', isLight: true, theme: 'intellibrite' }],
+            [11, { name: 'mastercleaner2', desc: 'Master Cleaner 2', body: 2 }],
+            [12, { name: 'pool', desc: 'Pool', hasHeatSource: true, body: 1 }],
+            [13, { name: 'spa', desc: 'Spa', hasHeatSource: true, body: 2 }]
         ]);
         this.valueMaps.pumpTypes = new byteValueMap([
             [1, { name: 'ss', desc: 'Single Speed', maxCircuits: 0, hasAddress: false, hasBody:true }],
@@ -91,12 +91,12 @@ export class IntelliCenterBoard extends SystemBoard {
         ]);
         this.valueMaps.heaterTypes = new byteValueMap([
             [1, { name: 'gas', desc: 'Gas Heater', hasAddress: false }],
-            [2, { name: 'solar', desc: 'Solar Heater', hasAddress: false, hasCoolSetpoint: true }],
-            [3, { name: 'heatpump', desc: 'Heat Pump', hasAddress: true }],
-            [4, { name: 'ultratemp', desc: 'UltraTemp', hasAddress: true, hasCoolSetpoint: true }],
+            [2, { name: 'solar', desc: 'Solar Heater', hasAddress: false, hasCoolSetpoint: true, hasPreference: true }],
+            [3, { name: 'heatpump', desc: 'Heat Pump', hasAddress: true, hasPreference: true }],
+            [4, { name: 'ultratemp', desc: 'UltraTemp', hasAddress: true, hasCoolSetpoint: true, hasPreference: true }],
             [5, { name: 'hybrid', desc: 'Hybrid', hasAddress: true }],
-            [6, { name: 'maxetherm', desc: 'Max-E-Therm', hasAddress: true }],
-            [7, { name: 'mastertemp', desc: 'MasterTemp', hasAddress: true }]
+            [6, { name: 'mastertemp', desc: 'MasterTemp', hasAddress: true }],
+            [7, { name: 'maxetherm', desc: 'Max-E-Therm', hasAddress: true }],
         ]);
 
 
@@ -173,19 +173,48 @@ export class IntelliCenterBoard extends SystemBoard {
             [2, { name: 'sunset', desc: 'Sunset' }]
         ]);
         this.valueMaps.lightThemes = new byteValueMap([
-            [0, { name: 'white', desc: 'White', sequence: 11 }],
-            [1, { name: 'green', desc: 'Green', sequence: 9 }],
-            [2, { name: 'blue', desc: 'Blue', sequence: 8 }],
-            [3, { name: 'magenta', desc: 'Magenta', sequence: 12 }],
-            [4, { name: 'red', desc: 'Red', sequence: 10 }],
-            [5, { name: 'sam', desc: 'SAm Mode', sequence: 1 }],
-            [6, { name: 'party', desc: 'Party', sequence: 2 }],
-            [7, { name: 'romance', desc: 'Romance', sequence: 3 }],
-            [8, { name: 'caribbean', desc: 'Caribbean', sequence: 4 }],
-            [9, { name: 'american', desc: 'American', sequence: 5 }],
-            [10, { name: 'sunset', desc: 'Sunset', sequence: 6 }],
-            [11, { name: 'royal', desc: 'Royal', sequence: 7 }],
+            [0, { name: 'white', desc: 'White', sequence: 11, types:['intellibrite', 'magicstream'] }],
+            [1, { name: 'green', desc: 'Green', sequence: 9, types: ['intellibrite', 'magicstream'] }],
+            [2, { name: 'blue', desc: 'Blue', sequence: 8, types: ['intellibrite', 'magicstream'] }],
+            [3, { name: 'magenta', desc: 'Magenta', sequence: 12, types: ['intellibrite', 'magicstream'] }],
+            [4, { name: 'red', desc: 'Red', sequence: 10, types: ['intellibrite', 'magicstream'] }],
+            [5, { name: 'sam', desc: 'SAm Mode', sequence: 1, types: ['intellibrite', 'magicstream'] }],
+            [6, { name: 'party', desc: 'Party', sequence: 2, types: ['intellibrite', 'magicstream'] }],
+            [7, { name: 'romance', desc: 'Romance', sequence: 3, types: ['intellibrite', 'magicstream'] }],
+            [8, { name: 'caribbean', desc: 'Caribbean', sequence: 4, types: ['intellibrite', 'magicstream'] }],
+            [9, { name: 'american', desc: 'American', sequence: 5, types: ['intellibrite', 'magicstream'] }],
+            [10, { name: 'sunset', desc: 'Sunset', sequence: 6, types: ['intellibrite', 'magicstream'] }],
+            [11, { name: 'royal', desc: 'Royal', sequence: 7, types: ['intellibrite', 'magicstream'] }],
             [255, { name: 'none', desc: 'None' }]
+        ]);
+        this.valueMaps.lightGroupCommands = new byteValueMap([
+            [1, { name: 'colorsync', desc: 'Sync', types: ['intellibrite'], command: 'colorSync', message: 'Synchronizing' }],
+            [2, { name: 'colorset', desc: 'Set', types: ['intellibrite'], command: 'colorSet', message: 'Sequencing Set Operation' }],
+            [3, { name: 'colorswim', desc: 'Swim', types: ['intellibrite'], command: 'colorSwim', message: 'Sequencing Swim Operation' }],
+            [12, { name: 'colorhold', desc: 'Hold', types: ['intellibrite', 'magicstream'], command: 'colorHold', message: 'Saving Current Colors', sequence: 13 }],
+            [13, { name: 'colorrecall', desc: 'Recall', types: ['intellibrite', 'magicstream'], command: 'colorRecall', message: 'Recalling Saved Colors', sequence: 14 }]
+        ]);
+
+        this.valueMaps.lightCommands = new byteValueMap([
+            [12, { name: 'colorhold', desc: 'Hold', types: ['intellibrite'], sequence: 13 }],
+            [13, { name: 'colorrecall', desc: 'Recall', types: ['intellibrite'], sequence: 14 }],
+            [15, {
+                name: 'lightthumper', desc: 'Thumper', types: ['magicstream'], command: 'lightThumper', message: 'Toggling Thumper',
+                sequence: [ // Cycle party mode 3 times.
+                    { isOn: false, timeout: 100 },
+                    { isOn: true, timeout: 100 },
+                    { isOn: false, timeout: 100 },
+                    { isOn: true, timeout: 5000 },
+                    { isOn: false, timeout: 100 },
+                    { isOn: true, timeout: 100 },
+                    { isOn: false, timeout: 100 },
+                    { isOn: true, timeout: 5000 },
+                    { isOn: false, timeout: 100 },
+                    { isOn: true, timeout: 100 },
+                    { isOn: false, timeout: 100 },
+                    { isOn: true, timeout: 1000 },
+                ]
+            }]
         ]);
         this.valueMaps.lightColors = new byteValueMap([
             [0, { name: 'white', desc: 'White' }],
@@ -569,7 +598,7 @@ export class IntelliCenterBoard extends SystemBoard {
     }
     public get commandSourceAddress(): number { return Message.pluginAddress; }
     public get commandDestAddress(): number { return 15; }
-    public static getAckResponse(action: number): Response { return Response.create({ dest: sys.board.commandSourceAddress, action: 1, payload: [action] }); }
+    public static getAckResponse(action: number, source?: number, dest?: number): Response { return Response.create({ source: source, dest: dest || sys.board.commandSourceAddress, action: 1, payload: [action] }); }
 }
 class IntelliCenterConfigRequest extends ConfigRequest {
     constructor(cat: number, ver: number, items?: number[], oncomplete?: Function) {
@@ -752,19 +781,36 @@ class IntelliCenterConfigQueue extends ConfigQueue {
         this.maybeQueueItems(curr.general, ver.general, ConfigCategories.general, [0, 1, 2, 3, 4, 5, 6, 7]);
         this.maybeQueueItems(curr.covers, ver.covers, ConfigCategories.covers, [0, 1]);
         if (this.compareVersions(curr.schedules, ver.schedules)) {
-            let req = new IntelliCenterConfigRequest(ConfigCategories.schedules, ver.schedules, [0, 1, 2, 3, 4], function (req: IntelliCenterConfigRequest) {
+            // Alright we used to think we could rely on the schedule start time as the trigger that identifies an active schedule.  However, active
+            // schedules are actually determined by looking at the schedule type messages[8-10].
+            let req = new IntelliCenterConfigRequest(ConfigCategories.schedules, ver.schedules, [8, 9, 10], function (req: IntelliCenterConfigRequest) {
                 let maxSchedId = sys.schedules.getMaxId();
                 req.fillRange(5, 5 + Math.min(Math.ceil(maxSchedId / 40), 7)); // Circuits
-                req.fillRange(8, 8 + Math.min(Math.ceil(maxSchedId / 40), 10)); // Flags
                 req.fillRange(11, 11 + Math.min(Math.ceil(maxSchedId / 40), 13)); // Schedule days bitmask
-                req.fillRange(14, 14 + Math.min(Math.ceil(maxSchedId / 40), 16)); // Unknown (one byte per schedule)
-                req.fillRange(17, 17 + Math.min(Math.ceil(maxSchedId / 40), 19)); // Unknown (one byte per schedule)
-                req.fillRange(20, 20 + Math.min(Math.ceil(maxSchedId / 40), 22)); // Unknown (one byte per schedule)
+                req.fillRange(0, Math.min(Math.ceil(maxSchedId / 40), 4)); // Start Time
                 req.fillRange(23, 23 + Math.min(Math.ceil(maxSchedId / 20), 26)); // End Time
+                req.fillRange(14, 14 + Math.min(Math.ceil(maxSchedId / 40), 16)); // Start Month
+                req.fillRange(17, 17 + Math.min(Math.ceil(maxSchedId / 40), 19)); // Start Day
+                req.fillRange(20, 20 + Math.min(Math.ceil(maxSchedId / 40), 22)); // Start Year
                 req.fillRange(28, 28 + Math.min(Math.ceil(maxSchedId / 40), 30)); // Heat Mode
                 req.fillRange(31, 31 + Math.min(Math.ceil(maxSchedId / 40), 33)); // Heat Mode
                 req.fillRange(34, 34 + Math.min(Math.ceil(maxSchedId / 40), 36)); // Heat Mode
             });
+            // DEPRECATED: 12-26-21 This was the old order of fetching the schedule.  This did not work properly with start times of midnight since the start time of 0
+            // was previously being used to determine whether the schedule was active.  The schedule/time type messages are now being used.
+            //let req = new IntelliCenterConfigRequest(ConfigCategories.schedules, ver.schedules, [0, 1, 2, 3, 4], function (req: IntelliCenterConfigRequest) {
+            //    let maxSchedId = sys.schedules.getMaxId();
+            //    req.fillRange(5, 5 + Math.min(Math.ceil(maxSchedId / 40), 7)); // Circuits
+            //    req.fillRange(8, 8 + Math.min(Math.ceil(maxSchedId / 40), 10)); // Flags
+            //    req.fillRange(11, 11 + Math.min(Math.ceil(maxSchedId / 40), 13)); // Schedule days bitmask
+            //    req.fillRange(14, 14 + Math.min(Math.ceil(maxSchedId / 40), 16)); // Unknown (one byte per schedule)
+            //    req.fillRange(17, 17 + Math.min(Math.ceil(maxSchedId / 40), 19)); // Unknown (one byte per schedule)
+            //    req.fillRange(20, 20 + Math.min(Math.ceil(maxSchedId / 40), 22)); // Unknown (one byte per schedule)
+            //    req.fillRange(23, 23 + Math.min(Math.ceil(maxSchedId / 20), 26)); // End Time
+            //    req.fillRange(28, 28 + Math.min(Math.ceil(maxSchedId / 40), 30)); // Heat Mode
+            //    req.fillRange(31, 31 + Math.min(Math.ceil(maxSchedId / 40), 33)); // Heat Mode
+            //    req.fillRange(34, 34 + Math.min(Math.ceil(maxSchedId / 40), 36)); // Heat Mode
+            //});
             this.push(req);
         }
         this.maybeQueueItems(curr.systemState, ver.systemState, ConfigCategories.systemState, [0]);
@@ -1956,15 +2002,83 @@ class IntelliCenterCircuitCommands extends CircuitCommands {
         }
         catch (err) { return Promise.reject(err); }
     }
-    public sequenceLightGroupAsync(id: number, operation: string): Promise<LightGroupState> {
+    public async runLightGroupCommandAsync(obj: any): Promise<ICircuitState> {
+        // Do all our validation.
+        try {
+            let id = parseInt(obj.id, 10);
+            let cmd = typeof obj.command !== 'undefined' ? sys.board.valueMaps.lightGroupCommands.findItem(obj.command) : { val: 0, name: 'undefined' };
+            if (cmd.val === 0) return Promise.reject(new InvalidOperationError(`Light group command ${cmd.name} does not exist`, 'runLightGroupCommandAsync'));
+            if (isNaN(id)) return Promise.reject(new InvalidOperationError(`Light group ${id} does not exist`, 'runLightGroupCommandAsync'));
+            let grp = sys.lightGroups.getItemById(id);
+            let nop = sys.board.valueMaps.circuitActions.getValue(cmd.name);
+            let sgrp = state.lightGroups.getItemById(grp.id);
+            sgrp.action = nop;
+            sgrp.emitEquipmentChange();
+            switch (cmd.name) {
+                case 'colorset':
+                    await this.sequenceLightGroupAsync(id, 'colorset');
+                    break;
+                case 'colorswim':
+                    await this.sequenceLightGroupAsync(id, 'colorswim');
+                    break;
+                case 'colorhold':
+                    await this.setLightGroupThemeAsync(id, 12);
+                    break;
+                case 'colorrecall':
+                    await this.setLightGroupThemeAsync(id, 13);
+                    break;
+                case 'lightthumper':
+                    break;
+            }
+            sgrp.action = 0;
+            sgrp.emitEquipmentChange();
+            return sgrp;
+        }
+        catch (err) { return Promise.reject(`Error runLightGroupCommandAsync ${err.message}`); }
+    }
+    public async runLightCommandAsync(obj: any): Promise<ICircuitState> {
+        // Do all our validation.
+        try {
+            let id = parseInt(obj.id, 10);
+            let cmd = typeof obj.command !== 'undefined' ? sys.board.valueMaps.lightCommands.findItem(obj.command) : { val: 0, name: 'undefined' };
+            if (cmd.val === 0) return Promise.reject(new InvalidOperationError(`Light command ${cmd.name} does not exist`, 'runLightCommandAsync'));
+            if (isNaN(id)) return Promise.reject(new InvalidOperationError(`Light ${id} does not exist`, 'runLightCommandAsync'));
+            let circ = sys.circuits.getItemById(id);
+            if (!circ.isActive) return Promise.reject(new InvalidOperationError(`Light circuit #${id} is not active`, 'runLightCommandAsync'));
+            let type = sys.board.valueMaps.circuitFunctions.transform(circ.type);
+            if (!type.isLight) return Promise.reject(new InvalidOperationError(`Circuit #${id} is not a light`, 'runLightCommandAsync'));
+            let nop = sys.board.valueMaps.circuitActions.getValue(cmd.name);
+            let slight = state.circuits.getItemById(circ.id);
+            slight.action = nop;
+            slight.emitEquipmentChange();
+            switch (cmd.name) {
+                case 'colorhold':
+                    await this.setLightThemeAsync(id, 12);
+                    break;
+                case 'colorrecall':
+                    await this.setLightThemeAsync(id, 13);
+                    break;
+                case 'lightthumper':
+                    // I do not know how to trigger the thumper.
+                    break;
+            }
+            slight.action = 0;
+            slight.emitEquipmentChange();
+            return slight;
+        }
+        catch (err) { return Promise.reject(`Error runLightCommandAsync ${err.message}`); }
+    }
+    public async sequenceLightGroupAsync(id: number, operation: string): Promise<LightGroupState> {
         let sgroup = state.lightGroups.getItemById(id);
-        let nop = sys.board.valueMaps.intellibriteActions.getValue(operation);
-        if (nop > 0) {
-            let out = this.createCircuitStateMessage(id, true);
+        try {
+            if (!sgroup.isActive) return Promise.reject(new InvalidEquipmentIdError(`An active light group could not be found with id ${id}`, id, 'lightGroup'));
+            let cmd = sys.board.valueMaps.lightGroupCommands.findItem(operation.toLowerCase());
             let ndx = id - sys.board.equipmentIds.circuitGroups.start;
             let byteNdx = Math.floor(ndx / 4);
             let bitNdx = (ndx * 2) - (byteNdx * 8);
+            let out = this.createCircuitStateMessage(id, true);
             let byte = out.payload[28 + byteNdx];
+
             // Each light group is represented by two bits on the status byte.  There are 3 status bytes that give us only 12 of the 16 on the config stream but the 168 message
             // does acutally send 4 so all are represented there.
             // [10] = Set
@@ -1973,46 +2087,96 @@ class IntelliCenterCircuitCommands extends CircuitCommands {
             // [11] = No sequencing underway.
             // In the end we are only trying to impact the specific bits in the middle of the byte that represent
             // the light group we are dealing with.            
-            switch (nop) {
-                case 1: // Sync
+            switch (cmd.name) {
+                case 'colorsync':
                     byte &= ((0xFC << bitNdx) | (0xFF >> (8 - bitNdx)));
                     break;
-                case 2: // Color Set
+                case 'colorset':
                     byte &= ((0xFE << bitNdx) | (0xFF >> (8 - bitNdx)));
                     break;
-                case 3: // Color Swim
+                case 'colorswim':
                     byte &= ((0xFD << bitNdx) | (0xFF >> (8 - bitNdx)));
                     break;
+                default:
+                    return Promise.reject(new InvalidOperationError(`Invalid Light Group Sequence ${operation}`, 'sequenceLightGroupAsync'));
             }
-            console.log({ groupNdx: ndx, action: nop, byteNdx: byteNdx, bitNdx: bitNdx, byte: byte })
+            sgroup.emitEquipmentChange();
             out.payload[28 + byteNdx] = byte;
-            return new Promise<LightGroupState>((resolve, reject) => {
+            // So now we have all the info we need to sequence the group.
+            await new Promise((resolve, reject) => {
                 out.retries = 5;
                 out.response = IntelliCenterBoard.getAckResponse(168);
                 out.onComplete = (err, msg) => {
                     if (!err) {
-                        sgroup.action = nop;
+                        sgroup.action = sys.board.valueMaps.circuitActions.getValue(cmd.name);
                         state.emitEquipmentChanges();
                         resolve(sgroup);
                     }
-                    else reject(err);
+                    else {
+                        sgroup.action = 0;
+                        reject(err);
+                    }
                 };
                 conn.queueSendMessage(out);
             });
-        }
-        return Promise.resolve(sgroup);
+            return sgroup;
+        } catch (err) { return Promise.reject(new InvalidOperationError(`Error Sequencing Light Group: ${err.message}`, 'sequenceLightGroupAsync')); }
+        //let nop = sys.board.valueMaps.circuitActions.getValue(operation);
+        //if (nop > 0) {
+        //    let out = this.createCircuitStateMessage(id, true);
+        //    let ndx = id - sys.board.equipmentIds.circuitGroups.start;
+        //    let byteNdx = Math.floor(ndx / 4);
+        //    let bitNdx = (ndx * 2) - (byteNdx * 8);
+        //    let byte = out.payload[28 + byteNdx];
+        //    // Each light group is represented by two bits on the status byte.  There are 3 status bytes that give us only 12 of the 16 on the config stream but the 168 message
+        //    // does acutally send 4 so all are represented there.
+        //    // [10] = Set
+        //    // [01] = Swim
+        //    // [00] = Sync
+        //    // [11] = No sequencing underway.
+        //    // In the end we are only trying to impact the specific bits in the middle of the byte that represent
+        //    // the light group we are dealing with.            
+        //    switch (nop) {
+        //        case 1: // Sync
+        //            byte &= ((0xFC << bitNdx) | (0xFF >> (8 - bitNdx)));
+        //            break;
+        //        case 2: // Color Set
+        //            byte &= ((0xFE << bitNdx) | (0xFF >> (8 - bitNdx)));
+        //            break;
+        //        case 3: // Color Swim
+        //            byte &= ((0xFD << bitNdx) | (0xFF >> (8 - bitNdx)));
+        //            break;
+        //    }
+        //    console.log({ groupNdx: ndx, action: nop, byteNdx: byteNdx, bitNdx: bitNdx, byte: byte })
+        //    out.payload[28 + byteNdx] = byte;
+        //    return new Promise<LightGroupState>((resolve, reject) => {
+        //        out.retries = 5;
+        //        out.response = IntelliCenterBoard.getAckResponse(168);
+        //        out.onComplete = (err, msg) => {
+        //            if (!err) {
+        //                sgroup.action = nop;
+        //                state.emitEquipmentChanges();
+        //                resolve(sgroup);
+        //            }
+        //            else reject(err);
+        //        };
+        //        conn.queueSendMessage(out);
+        //    });
+        //}
+        //return Promise.resolve(sgroup);
     }
-    public getLightThemes(type: number): any[] {
-        switch (type) {
-            case 5: // Intellibrite
-            case 6: // Globrite
-            case 8: // Magicstream
-            case 10: // ColorCascade
-                return sys.board.valueMaps.lightThemes.toArray();
-            default:
-                return [];
-        }
-    }
+    // 12-01-21 RKS: This has been deprecated.  This allows for multiple vendor light themes driven by the metadata on the valuemaps.
+    //public getLightThemes(type: number): any[] {
+    //    switch (type) {
+    //        case 5: // Intellibrite
+    //        case 6: // Globrite
+    //        case 8: // Magicstream
+    //        case 10: // ColorCascade
+    //            return sys.board.valueMaps.lightThemes.toArray();
+    //        default:
+    //            return [];
+    //    }
+    //}
     private async verifyVersionAsync(): Promise<boolean> {
         return new Promise<boolean>((resolve, reject) => {
             let out = Outbound.create({
@@ -2072,7 +2236,7 @@ class IntelliCenterCircuitCommands extends CircuitCommands {
             conn.queueSendMessage(out);
         });
     }
-    public async setCircuitStateAsync(id: number, val: boolean): Promise<ICircuitState> {
+    public async setCircuitStateAsync(id: number, val: boolean, ignoreDelays?: boolean): Promise<ICircuitState> {
         let c = sys.circuits.getInterfaceById(id);
         if (c.master !== 0) return await super.setCircuitStateAsync(id, val);
         // As of 1.047 there is a sequence to this.
@@ -2164,6 +2328,30 @@ class IntelliCenterCircuitCommands extends CircuitCommands {
         }
         catch (err) { return Promise.reject(err); }
     }
+    public async setColorHoldAsync(id: number): Promise<ICircuitState> {
+        let circuit = sys.circuits.getInterfaceById(id);
+        if (circuit.master === 1) return await super.setColorHoldAsync(id);
+        try {
+            if (sys.board.equipmentIds.circuitGroups.isInRange(id)) {
+                await this.setLightGroupThemeAsync(id, 12);
+                return Promise.resolve(state.lightGroups.getItemById(id));
+            }
+            return await this.setLightThemeAsync(id, 12);
+        }
+        catch (err) { return Promise.reject(err); }
+    }
+    public async setColorRecallAsync(id: number): Promise<ICircuitState> {
+        let circuit = sys.circuits.getInterfaceById(id);
+        if (circuit.master === 1) return await super.setColorHoldAsync(id);
+        try {
+            if (sys.board.equipmentIds.circuitGroups.isInRange(id)) {
+                await this.setLightGroupThemeAsync(id, 13);
+                return Promise.resolve(state.lightGroups.getItemById(id));
+            }
+            return await this.setLightThemeAsync(id, 13);
+        }
+        catch (err) { return Promise.reject(err); }
+    }
     public async setLightThemeAsync(id: number, theme: number): Promise<ICircuitState> {
         let circuit = sys.circuits.getInterfaceById(id);
         if (circuit.master === 1) return await super.setLightThemeAsync(id, theme);
@@ -2179,6 +2367,7 @@ class IntelliCenterCircuitCommands extends CircuitCommands {
                     action: 168, payload: [1, 0, id - 1, circuit.type, circuit.freeze ? 1 : 0, circuit.showInFeatures ? 1 : 0,
                         theme, Math.floor(circuit.eggTimer / 60), circuit.eggTimer - ((Math.floor(circuit.eggTimer) / 60) * 60), circuit.dontStop ? 1 : 0]
                 });
+                cstate.action = sys.board.valueMaps.circuitActions.getValue('lighttheme');
                 out.response = IntelliCenterBoard.getAckResponse(168);
                 out.retries = 5;
                 await new Promise<void>((resolve, reject) => {
@@ -2191,6 +2380,7 @@ class IntelliCenterCircuitCommands extends CircuitCommands {
                         else {
                             reject(err);
                         }
+                        cstate.action = 0;
                     };
                     out.appendPayloadString(circuit.name, 16);
                     conn.queueSendMessage(out);
@@ -2523,7 +2713,7 @@ class IntelliCenterChlorinatorCommands extends ChlorinatorCommands {
         if (typeof obj.disabled !== 'undefined') chlor.disabled = utils.makeBool(obj.disabled);
         if (typeof chlor.body === 'undefined') chlor.body = obj.body || 32;
         // Verify the data.
-        let body = sys.board.bodies.mapBodyAssociation(chlor.body);
+        let body = sys.board.bodies.mapBodyAssociation(typeof obj.body === 'undefined' ? chlor.body || 0 : obj.body);
         if (typeof body === 'undefined') return Promise.reject(new InvalidEquipmentDataError(`Chlorinator body association is not valid: ${chlor.body}`, 'chlorinator', chlor.body));
         if (poolSetpoint > 100 || poolSetpoint < 0) return Promise.reject(new InvalidEquipmentDataError(`Chlorinator poolSetpoint is out of range: ${chlor.poolSetpoint}`, 'chlorinator', chlor.poolSetpoint));
         if (spaSetpoint > 100 || spaSetpoint < 0) return Promise.reject(new InvalidEquipmentDataError(`Chlorinator spaSetpoint is out of range: ${chlor.poolSetpoint}`, 'chlorinator', chlor.spaSetpoint));
@@ -2542,6 +2732,7 @@ class IntelliCenterChlorinatorCommands extends ChlorinatorCommands {
                     else {
                         let schlor = state.chlorinators.getItemById(id, true);
                         let cchlor = sys.chlorinators.getItemById(id, true);
+                        schlor.body = chlor.body = body.val;
                         chlor.disabled = disabled;
                         chlor.model = model;
                         schlor.type = chlor.type = chlorType;
@@ -3020,11 +3211,22 @@ class IntelliCenterBodyCommands extends BodyCommands {
     public async setHeatModeAsync(body: Body, mode: number): Promise<BodyTempState> {
         return new Promise<BodyTempState>((resolve, reject) => {
             const self = this;
-            let byte2 = 18;
-            let mode1 = sys.bodies.getItemById(1).setPoint || 100;
-            let mode2 = sys.bodies.getItemById(2).setPoint || 100;
-            let mode3 = sys.bodies.getItemById(3).setPoint || 100;
-            let mode4 = sys.bodies.getItemById(4).setPoint || 100;
+            let byte2 = 22;
+            let body1 = sys.bodies.getItemById(1);
+            let body2 = sys.bodies.getItemById(2);
+
+            let heat1 = body1.heatSetpoint || 78;
+            let cool1 = body1.coolSetpoint || 100;
+            let heat2 = body2.heatSetpoint || 78;
+            let cool2 = body2.coolSetpoint || 103;
+
+            let mode1 = body1.heatMode || 1;
+            let mode2 = body2.heatMode || 1;
+            let bitopts = 0;
+            if (sys.general.options.clockSource) bitopts += 32;
+            if (sys.general.options.clockMode === 24) bitopts += 64;
+            if (sys.general.options.adjustDST) bitopts += 128;
+
             switch (body.id) {
                 case 1:
                     byte2 = 22;
@@ -3034,19 +3236,12 @@ class IntelliCenterBodyCommands extends BodyCommands {
                     byte2 = 23;
                     mode2 = mode;
                     break;
-                case 3:
-                    byte2 = 24;
-                    mode3 = mode;
-                    break;
-                case 4:
-                    byte2 = 25;
-                    mode4 = mode;
-                    break;
             }
             let out = Outbound.create({
                 action: 168,
-                payload: [0, 0, byte2, 1, 0, 0, 129, 0, 0, 0, 0, 0, 0, 0, 176, 89, 27, 110, 3, 0, 0, 100, 100, 100, 100, mode1, mode2, mode3, mode4, 15, 0
-                    , 0, 0, 0, 100, 0, 0, 0, 0, 0, 0],
+                payload: [0, 0, byte2, 1, 0, 0, 129, 0, 0, 0, 0, 0, 0, 0, bitopts, 89, 27, 110, 3, 0, 0,
+                    heat1, cool1, heat2, cool2, mode1, mode2, 0, 0, 15,
+                    sys.general.options.pumpDelay ? 1 : 0, sys.general.options.cooldownDelay ? 1 : 0, 0, 100, 0, 0, 0, 0, sys.general.options.manualPriority ? 1 : 0, sys.general.options.manualHeat ? 1 : 0, 0],
                 retries: 5,
                 response: IntelliCenterBoard.getAckResponse(168),
                 onComplete: (err, msg) => {
@@ -3067,31 +3262,25 @@ class IntelliCenterBodyCommands extends BodyCommands {
         let byte2 = 18;
         let body1 = sys.bodies.getItemById(1);
         let body2 = sys.bodies.getItemById(2);
-        let body3 = sys.bodies.getItemById(3);
-        let body4 = sys.bodies.getItemById(4);
 
-        let temp1 = sys.bodies.getItemById(1).setPoint || 100;
-        let temp2 = sys.bodies.getItemById(2).setPoint || 100;
-        let temp3 = sys.bodies.getItemById(3).setPoint || 100;
-        let temp4 = sys.bodies.getItemById(4).setPoint || 100;
+        let heat1 = body1.heatSetpoint || 78;
+        let cool1 = body1.coolSetpoint || 100;
+        let heat2 = body2.heatSetpoint || 78;
+        let cool2 = body2.coolSetpoint || 103;
         switch (body.id) {
             case 1:
                 byte2 = 18;
-                temp1 = setPoint;
+                heat1 = setPoint;
                 break;
             case 2:
                 byte2 = 20;
-                temp2 = setPoint;
-                break;
-            case 3:
-                byte2 = 19;
-                temp3 = setPoint;
-                break;
-            case 4:
-                byte2 = 21;
-                temp4 = setPoint;
+                heat2 = setPoint;
                 break;
         }
+        let bitopts = 0;
+        if (sys.general.options.clockSource) bitopts += 32;
+        if (sys.general.options.clockMode === 24) bitopts += 64;
+        if (sys.general.options.adjustDST) bitopts += 128;
         //                                                             6                             15       17 18        21   22       24 25 
         //[255, 0, 255][165, 63, 15, 16, 168, 41][0, 0, 18, 1, 0, 0, 129, 0, 0, 0, 0, 0, 0, 0, 176,  89, 27, 110, 3, 0, 0, 89, 100, 98, 100, 0, 0, 0, 0, 15, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0][5, 243]
         //[255, 0, 255][165, 63, 15, 16, 168, 41][0, 0, 18, 1, 0, 0,   0, 0, 0, 0, 0, 0, 0, 0, 176, 235, 27, 167, 1, 0, 0, 89,  81, 98, 103, 5, 0, 0, 0, 15, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0][6, 48]
@@ -3099,8 +3288,8 @@ class IntelliCenterBodyCommands extends BodyCommands {
             action: 168,
             response: IntelliCenterBoard.getAckResponse(168),
             retries: 5,
-            payload: [0, 0, byte2, 1, 0, 0, 129, 0, 0, 0, 0, 0, 0, 0, 176, 89, 27, 110, 3, 0, 0,
-                temp1, temp3, temp2, temp4, body1.heatMode || 0, body2.heatMode || 0, body3.heatMode || 0, body4.heatMode || 0, 15,
+            payload: [0, 0, byte2, 1, 0, 0, 129, 0, 0, 0, 0, 0, 0, 0, bitopts, 89, 27, 110, 3, 0, 0,
+                heat1, cool1, heat2, cool2, body1.heatMode || 1, body2.heatMode || 1, 0, 0, 15,
                 sys.general.options.pumpDelay ? 1 : 0, sys.general.options.cooldownDelay ? 1 : 0, 0, 100, 0, 0, 0, 0, sys.general.options.manualPriority ? 1 : 0, sys.general.options.manualHeat ? 1 : 0, 0]
         });
         return new Promise<BodyTempState>((resolve, reject) => {
@@ -3116,23 +3305,14 @@ class IntelliCenterBodyCommands extends BodyCommands {
         });
     }
     public async setCoolSetpointAsync(body: Body, setPoint: number): Promise<BodyTempState> {
-        //[165, 1, 15, 16, 168, 41][0, 0, 19, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 176, 110, 30, 188, 3, 0, 0, 76, 99, 78, 100, 5, 5, 0, 0, 15, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0][5, 33]
-        let byte2 = 19;
+        let byte2 = 18;
         let body1 = sys.bodies.getItemById(1);
         let body2 = sys.bodies.getItemById(2);
-        let body3 = sys.bodies.getItemById(3);
-        let body4 = sys.bodies.getItemById(3);
 
-        let temp1 = sys.bodies.getItemById(1).setPoint || 100;
-        let cool1 = sys.bodies.getItemById(1).coolSetpoint || 100;
-        let temp2 = sys.bodies.getItemById(2).setPoint || 100;
-        let cool2 = sys.bodies.getItemById(2).coolSetpoint || 100;
-
-        //Them
-        //[165, 63, 15, 16, 168, 41][0, 0, 19, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 176, 59, 30, 5, 5, 0, 0, 90, 102, 98, 81, 3, 1, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][4, 129]
-        //Us
-        //[165, 63, 15, 33, 168, 40][0, 0, 19, 1, 0, 0,   0, 0, 0, 0, 0, 0, 0, 0, 176, 89, 27, 5, 5, 0, 0, 90, 103, 98, 81, 3, 1, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0][5, 249]
-        //[165, 63, 15, 33, 168, 40][0, 0, 19, 1, 0, 0, 129, 0, 0, 0, 0, 0, 0, 0, 176, 89, 27, 110, 3, 0, 0, 90, 103, 98, 81, 3, 1, 0, 0, 15, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0][5, 249]
+        let heat1 = body1.heatSetpoint || 78;
+        let cool1 = body1.coolSetpoint || 100;
+        let heat2 = body2.heatSetpoint || 78;
+        let cool2 = body2.coolSetpoint || 103;
         switch (body.id) {
             case 1:
                 byte2 = 19;
@@ -3143,6 +3323,10 @@ class IntelliCenterBodyCommands extends BodyCommands {
                 cool2 = setPoint;
                 break;
         }
+        let bitopts = 0;
+        if (sys.general.options.clockSource) bitopts += 32;
+        if (sys.general.options.clockMode === 24) bitopts += 64;
+        if (sys.general.options.adjustDST) bitopts += 128;
         //                                                             6                             15       17 18        21   22       24 25 
         //[255, 0, 255][165, 63, 15, 16, 168, 41][0, 0, 18, 1, 0, 0, 129, 0, 0, 0, 0, 0, 0, 0, 176,  89, 27, 110, 3, 0, 0, 89, 100, 98, 100, 0, 0, 0, 0, 15, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0][5, 243]
         //[255, 0, 255][165, 63, 15, 16, 168, 41][0, 0, 18, 1, 0, 0,   0, 0, 0, 0, 0, 0, 0, 0, 176, 235, 27, 167, 1, 0, 0, 89,  81, 98, 103, 5, 0, 0, 0, 15, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 0][6, 48]
@@ -3150,8 +3334,8 @@ class IntelliCenterBodyCommands extends BodyCommands {
             action: 168,
             response: IntelliCenterBoard.getAckResponse(168),
             retries: 5,
-            payload: [0, 0, byte2, 1, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 176, 89, 27, 110, 3, 0, 0,
-                temp1, cool1, temp2, cool2, body1.heatMode || 0, body2.heatMode || 0, body3.heatMode || 0, body4.heatMode || 0, 15,
+            payload: [0, 0, byte2, 1, 0, 0, 129, 0, 0, 0, 0, 0, 0, 0, bitopts, 89, 27, 110, 3, 0, 0,
+                heat1, cool1, heat2, cool2, body1.heatMode || 1, body2.heatMode || 1, 0, 0, 15,
                 sys.general.options.pumpDelay ? 1 : 0, sys.general.options.cooldownDelay ? 1 : 0, 0, 100, 0, 0, 0, 0, sys.general.options.manualPriority ? 1 : 0, sys.general.options.manualHeat ? 1 : 0, 0]
         });
         return new Promise<BodyTempState>((resolve, reject) => {
@@ -3159,7 +3343,7 @@ class IntelliCenterBodyCommands extends BodyCommands {
                 if (err) reject(err);
                 else {
                     let bstate = state.temps.bodies.getItemById(body.id);
-                    body.coolSetpoint = bstate.coolSetpoint = setPoint;
+                    body.heatSetpoint = bstate.heatSetpoint = setPoint;
                     resolve(bstate);
                 }
             };
@@ -3299,7 +3483,7 @@ class IntelliCenterScheduleCommands extends ScheduleCommands {
                     , startDate.getMonth() + 1
                     , startDate.getDay() || 0
                     , startDate.getFullYear() - 2000
-                    , 32
+                    , 0 // This changed to 0 to mean no change in 1.047
                     , 78
                     , 100
                 ],
@@ -3349,9 +3533,8 @@ class IntelliCenterHeaterCommands extends HeaterCommands {
             if (isNaN(id)) return reject(new InvalidEquipmentIdError('Heater Id is not valid.', obj.id, 'Heater'));
             let heater: Heater;
             if (id <= 0) {
-                // We are adding a heater.  In this case all heaters are virtual.
-                let vheaters = sys.heaters.filter(h => h.master === 1);
-                id = vheaters.length + 1;
+                // We are adding a heater.  In this case we need to find the first id slot that is empty.
+                id = sys.heaters.getNextEquipmentId(new EquipmentIdRange(1, 16));
             }
             heater = sys.heaters.getItemById(id, false);
             let type = 0;
@@ -3551,7 +3734,7 @@ class IntelliCenterHeaterCommands extends HeaterCommands {
 
             sys.board.valueMaps.heatModes = new byteValueMap([[1, { name: 'off', desc: 'Off' }]]);
             if (gasHeaterInstalled) sys.board.valueMaps.heatModes.merge([[2, { name: 'heater', desc: 'Heater' }]]);
-            if (mastertempInstalled) sys.board.valueMaps.heatModes.merge([11, { name: 'mtheater', desc: 'MasterTemp' }]);
+            if (mastertempInstalled) sys.board.valueMaps.heatModes.merge([[11, { name: 'mtheater', desc: 'MasterTemp' }]]);
             if (solarInstalled && (gasHeaterInstalled || heatPumpInstalled || mastertempInstalled)) sys.board.valueMaps.heatModes.merge([[3, { name: 'solar', desc: 'Solar Only' }], [4, { name: 'solarpref', desc: 'Solar Preferred' }]]);
             else if (solarInstalled) sys.board.valueMaps.heatModes.merge([[3, { name: 'solar', desc: 'Solar' }]]);
             if (ultratempInstalled && (gasHeaterInstalled || heatPumpInstalled || mastertempInstalled)) sys.board.valueMaps.heatModes.merge([[5, { name: 'ultratemp', desc: 'UltraTemp Only' }], [6, { name: 'ultratemppref', desc: 'UltraTemp Pref' }]]);
@@ -3661,24 +3844,24 @@ export class IntelliCenterChemControllerCommands extends ChemControllerCommands 
         }
         if (isNaN(pHSetpoint) || pHSetpoint > type.ph.max || pHSetpoint < type.ph.min) Promise.reject(new InvalidEquipmentDataError(`Invalid pH setpoint`, 'ph.setpoint', pHSetpoint));
         if (isNaN(orpSetpoint) || orpSetpoint > type.orp.max || orpSetpoint < type.orp.min) Promise.reject(new InvalidEquipmentDataError(`Invalid orp setpoint`, 'orp.setpoint', orpSetpoint));
-        let phTolerance = typeof data.ph.tolerance !== 'undefined' ? data.ph.tolerance : chem.ph.tolerance;
-        let orpTolerance = typeof data.orp.tolerance !== 'undefined' ? data.orp.tolerance : chem.orp.tolerance;
-        if (typeof data.ph.tolerance !== 'undefined') {
+        let phTolerance = typeof data.ph !== 'undefined' && typeof data.ph.tolerance !== 'undefined' ? data.ph.tolerance : chem.ph.tolerance;
+        let orpTolerance = typeof data.orp !== 'undefined' && typeof data.orp.tolerance !== 'undefined' ? data.orp.tolerance : chem.orp.tolerance;
+        if (typeof data.ph !== 'undefined' && typeof data.ph.tolerance !== 'undefined') {
             if (typeof data.ph.tolerance.enabled !== 'undefined') phTolerance.enabled = utils.makeBool(data.ph.tolerance.enabled);
             if (typeof data.ph.tolerance.low !== 'undefined') phTolerance.low = parseFloat(data.ph.tolerance.low);
             if (typeof data.ph.tolerance.high !== 'undefined') phTolerance.high = parseFloat(data.ph.tolerance.high);
             if (isNaN(phTolerance.low)) phTolerance.low = type.ph.min;
             if (isNaN(phTolerance.high)) phTolerance.high = type.ph.max;
         }
-        if (typeof data.orp.tolerance !== 'undefined') {
+        if (typeof data.orp !== 'undefined' && typeof data.orp.tolerance !== 'undefined') {
             if (typeof data.orp.tolerance.enabled !== 'undefined') orpTolerance.enabled = utils.makeBool(data.orp.tolerance.enabled);
             if (typeof data.orp.tolerance.low !== 'undefined') orpTolerance.low = parseFloat(data.orp.tolerance.low);
             if (typeof data.orp.tolerance.high !== 'undefined') orpTolerance.high = parseFloat(data.orp.tolerance.high);
             if (isNaN(orpTolerance.low)) orpTolerance.low = type.orp.min;
             if (isNaN(orpTolerance.high)) orpTolerance.high = type.orp.max;
         }
-        let phEnabled = typeof data.ph.enabled !== 'undefined' ? utils.makeBool(data.ph.enabled) : chem.ph.enabled;
-        let orpEnabled = typeof data.orp.enabled !== 'undefined' ? utils.makeBool(data.orp.enabled) : chem.orp.enabled;
+        let phEnabled = typeof data.ph !== 'undefined' && typeof data.ph.enabled !== 'undefined' ? utils.makeBool(data.ph.enabled) : chem.ph.enabled;
+        let orpEnabled = typeof data.orp !== 'undefined' && typeof data.orp.enabled !== 'undefined' ? utils.makeBool(data.orp.enabled) : chem.orp.enabled;
         let siCalcType = typeof data.siCalcType !== 'undefined' ? sys.board.valueMaps.siCalcTypes.encode(data.siCalcType, 0) : chem.siCalcType;
 
         let saltLevel = (state.chlorinators.length > 0) ? state.chlorinators.getItemById(1).saltLevel || 1000 : 1000
@@ -3686,14 +3869,18 @@ export class IntelliCenterChemControllerCommands extends ChemControllerCommands 
         chem.orp.tank.capacity = 6;
         let acidTankLevel = typeof data.ph !== 'undefined' && typeof data.ph.tank !== 'undefined' && typeof data.ph.tank.level !== 'undefined' ? parseInt(data.ph.tank.level, 10) : schem.ph.tank.level;
         let orpTankLevel = typeof data.orp !== 'undefined' && typeof data.orp.tank !== 'undefined' && typeof data.orp.tank.level !== 'undefined' ? parseInt(data.orp.tank.level, 10) : schem.orp.tank.level;
+        //Them
+        //[255, 0, 255][165, 63, 15, 16, 168, 20][8, 0, 0, 32, 1, 144, 1, 248, 2, 144, 1, 1, 1, 29, 0, 0, 0, 100, 0, 0][4, 135]
+        //Us
+        //[255, 0, 255][165,  0, 15, 33, 168, 20][8, 0, 0, 32, 1, 144, 1, 248, 2, 144, 1, 1, 1, 33, 0, 0, 0, 100, 0, 0][4, 93]
         return new Promise<ChemController>((resolve, reject) => {
             let out = Outbound.create({
-                protocol: Protocol.IntelliChem,
+                protocol: Protocol.Broadcast,
                 action: 168,
                 payload: [],
                 retries: 3, // We are going to try 4 times.
                 response: IntelliCenterBoard.getAckResponse(168),
-                onAbort: () => { },
+                //onAbort: () => { },
                 onComplete: (err) => {
                     if (err) reject(err);
                     else {
@@ -3728,19 +3915,23 @@ export class IntelliCenterChemControllerCommands extends ChemControllerCommands 
                     }
                 }
             });
+            
             //[8, 0, chem.id - 1, body.val, 1, chem.address, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0]
-            out.insertPayloadBytes(0, 0, 18);
+            out.insertPayloadBytes(0, 0, 20);
             out.setPayloadByte(0, 8);
             out.setPayloadByte(1, 0);
             out.setPayloadByte(2, chem.id - 1);
             out.setPayloadByte(3, body.val);
-            out.setPayloadByte(4, 1);
+            out.setPayloadByte(4, acidTankLevel + 1);
             out.setPayloadByte(5, address);
             out.setPayloadByte(6, 1);
             out.setPayloadInt(7, Math.round(pHSetpoint * 100), 700);
             out.setPayloadInt(9, orpSetpoint, 400);
             out.setPayloadByte(11, 1);
             out.setPayloadByte(12, 1);
+            //out.setPayloadByte(11, acidTankLevel + 1, 1);
+            //out.setPayloadByte(12, orpTankLevel + 1, 1);
+
             out.setPayloadInt(13, calciumHardness, 25);
             out.setPayloadInt(15, cyanuricAcid, 0);
             out.setPayloadInt(17, alkalinity, 25);

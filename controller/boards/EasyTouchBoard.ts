@@ -20,7 +20,7 @@ import { conn } from '../comms/Comms';
 import { Message, Outbound, Protocol, Response } from '../comms/messages/Messages';
 import { utils } from '../Constants';
 import { Body, ChemController, ConfigVersion, CustomName, EggTimer, Feature, Heater, ICircuit, LightGroup, LightGroupCircuit, PoolSystem, Pump, Schedule, sys } from '../Equipment';
-import { EquipmentTimeoutError, InvalidEquipmentDataError, InvalidEquipmentIdError } from '../Errors';
+import { EquipmentTimeoutError, InvalidEquipmentDataError, InvalidEquipmentIdError, InvalidOperationError } from '../Errors';
 import { ncp } from "../nixie/Nixie";
 import { BodyTempState, ChlorinatorState, ICircuitGroupState, ICircuitState, LightGroupState, state } from '../State';
 import { BodyCommands, byteValueMap, ChemControllerCommands, ChlorinatorCommands, CircuitCommands, ConfigQueue, ConfigRequest, EquipmentIdRange, FeatureCommands, HeaterCommands, PumpCommands, ScheduleCommands, SystemBoard, SystemCommands } from './SystemBoard';
@@ -173,9 +173,9 @@ export class EasyTouchBoard extends SystemBoard {
         this.valueMaps.heaterTypes = new byteValueMap([
             [0, { name: 'none', desc: 'No Heater', hasAddress: false }],
             [1, { name: 'gas', desc: 'Gas Heater', hasAddress: false }],
-            [2, { name: 'solar', desc: 'Solar Heater', hasAddress: false }],
-            [3, { name: 'heatpump', desc: 'Heat Pump', hasAddress: true }],
-            [4, { name: 'ultratemp', desc: 'UltraTemp', hasAddress: true, hasCoolSetpoint: true }],
+            [2, { name: 'solar', desc: 'Solar Heater', hasAddress: false, hasPreference: true }],
+            [3, { name: 'heatpump', desc: 'Heat Pump', hasAddress: true, hasPreference: true }],
+            [4, { name: 'ultratemp', desc: 'UltraTemp', hasAddress: true, hasCoolSetpoint: true, hasPreference: true }],
             [5, { name: 'hybrid', desc: 'Hybrid', hasAddress: true }],
             [6, { name: 'maxetherm', desc: 'Max-E-Therm', hasAddress: true }],
             [7, { name: 'mastertemp', desc: 'MasterTemp', hasAddress: true }]
@@ -296,6 +296,14 @@ export class EasyTouchBoard extends SystemBoard {
             }
             return { val: b, days: days };
         };
+        this.valueMaps.lightCommands = new byteValueMap([
+            [128, { name: 'colorsync', desc: 'Sync', types: ['intellibrite'] }],
+            [144, { name: 'colorset', desc: 'Set', types: ['intellibrite'] }],
+            [160, { name: 'colorswim', desc: 'Swim', types: ['intellibrite'] }],
+            [190, { name: 'colorhold', desc: 'Hold', types: ['intellibrite'], sequence: 13 }],
+            [191, { name: 'colorrecall', desc: 'Recall', types: ['intellibrite'], sequence: 14 }],
+            [208, { name: 'thumper', desc: 'Thumper', types: ['magicstream'] }]
+        ]);
         this.valueMaps.lightThemes.transform = function (byte) { return extend(true, { val: byte }, this.get(byte) || this.get(255)); };
         this.valueMaps.circuitNames.transform = function (byte) {
             if (byte < 200) {
@@ -313,7 +321,7 @@ export class EasyTouchBoard extends SystemBoard {
             [128, { val: 128, name: 'timeout', desc: 'Timeout' }],
             [129, { val: 129, name: 'service-timeout', desc: 'Service/Timeout' }],
             [255, { name: 'error', desc: 'System Error' }]
-          ]);
+        ]);
         this.valueMaps.expansionBoards = new byteValueMap([
             [0, { name: 'ET28', part: 'ET2-8', desc: 'EasyTouch2 8', circuits: 8, shared: true }],
             [1, { name: 'ET28P', part: 'ET2-8P', desc: 'EasyTouch2 8P', circuits: 8, shared: false }],
@@ -1056,6 +1064,48 @@ class TouchSystemCommands extends SystemCommands {
     }
 }
 class TouchBodyCommands extends BodyCommands {
+    public async setBodyAsync(obj: any): Promise<Body> {
+        // The 168 is a funky packet in *Touch because it can set:
+        // * Intellichem Installed (byte 3, bit 1)
+        // * Manual spa heat (byte 4, bit 1) which only applies to the spa but is a 
+        //    general option
+        // and this function can be called by either setIntelliChem (protected)
+        // or directly from setBodyAsync (/config/body endpoint).
+        // We also need to return the proper body setting manual heat, but it is irrelevant
+        // for when we are returning to chemController
+        try {
+            return new Promise<Body>((resolve, reject) => {
+                let manualHeat = sys.general.options.manualHeat;
+                if (typeof obj.manualHeat !== 'undefined') manualHeat = utils.makeBool(obj.manualHeat);
+                let body = sys.bodies.getItemById(obj.id, false);
+                let intellichemInstalled = sys.chemControllers.getItemByAddress(144, false).isActive;
+                let out = Outbound.create({
+                    dest: 16,
+                    action: 168,
+                    retries: 3,
+                    response: true,
+                    onComplete: (err, msg) => {
+                        if (err) reject(err);
+                        else {
+                            sys.general.options.manualHeat = manualHeat;
+                            if (body.type === 1){ // spa
+                                body.manualHeat = manualHeat;
+                            };
+                            if (typeof obj.capacity !== 'undefined') body.capacity = parseInt(obj.capacity, 10);;
+                            state.emitEquipmentChanges();
+                            resolve(body);
+                        }
+                    }
+                });
+                out.insertPayloadBytes(0, 0, 9);
+                out.setPayloadByte(3, intellichemInstalled ? 255 : 254);
+                out.setPayloadByte(4, manualHeat ? 1 : 0);
+                conn.queueSendMessage(out);
+            });
+
+        }
+        catch (err) { return Promise.reject(err); }
+    }
     public async setHeatModeAsync(body: Body, mode: number): Promise<BodyTempState> {
         return new Promise<BodyTempState>((resolve, reject) => {
             //  [16,34,136,4],[POOL HEAT Temp,SPA HEAT Temp,Heat Mode,0,2,56]
@@ -1253,18 +1303,20 @@ class TouchBodyCommands extends BodyCommands {
     }
 }
 export class TouchCircuitCommands extends CircuitCommands {
-    public getLightThemes(type?: number): any[] {
-        let themes = sys.board.valueMaps.lightThemes.toArray();
-        if (typeof type === 'undefined') return themes;
-        switch (type) {
-            case 8: // Magicstream
-                return themes.filter(theme => theme.type === 'magicstream');
-            case 16: // Intellibrite
-                return themes.filter(theme => theme.type === 'intellibrite');
-            default:
-                return [];
-        }
-    }
+    // RKS: 12-01-2021 This has been deprecated we are now driving this through metadata on the valuemaps.  This allows
+    // for multiple types of standardized on/off sequences with nixie controllers.
+    //public getLightThemes(type?: number): any[] {
+    //    let themes = sys.board.valueMaps.lightThemes.toArray();
+    //    if (typeof type === 'undefined') return themes;
+    //    switch (type) {
+    //        case 8: // Magicstream
+    //            return themes.filter(theme => theme.types.includes('magicstream'));
+    //        case 16: // Intellibrite
+    //            return themes.filter(theme => theme.types.includes('intellibrite'));
+    //        default:
+    //            return [];
+    //    }
+    //}
     public async setCircuitAsync(data: any): Promise<ICircuit> {
         try {
             // example [255,0,255][165,33,16,34,139,5][17,14,209,0,0][2,120]
@@ -1336,7 +1388,7 @@ export class TouchCircuitCommands extends CircuitCommands {
         data.functionId = sys.board.valueMaps.circuitFunctions.getValue('notused');
         return this.setCircuitAsync(data);
     }
-    public async setCircuitStateAsync(id: number, val: boolean): Promise<ICircuitState> {
+    public async setCircuitStateAsync(id: number, val: boolean, ignoreDelays?: boolean): Promise<ICircuitState> {
         if (isNaN(id)) return Promise.reject(new InvalidEquipmentIdError('Circuit or Feature id not valid', id, 'Circuit'));
         let c = sys.circuits.getInterfaceById(id);
         if (c.master !== 0) return await super.setCircuitStateAsync(id, val);
@@ -1523,15 +1575,74 @@ export class TouchCircuitCommands extends CircuitCommands {
         });
 
     }
-    public async setLightThemeAsync(id: number, theme: number) {
+    public async setLightThemeAsync(id: number, theme: number): Promise<ICircuitState> {
         // Re-route this as we cannot set individual circuit themes in *Touch.
         return this.setLightGroupThemeAsync(id, theme);
+    }
+    public async runLightGroupCommandAsync(obj: any): Promise<ICircuitState> {
+        // Do all our validation.
+        try {
+            let id = parseInt(obj.id, 10);
+            let cmd = typeof obj.command !== 'undefined' ? sys.board.valueMaps.lightGroupCommands.findItem(obj.command) : { val: 0, name: 'undefined' };
+            if (cmd.val === 0) return Promise.reject(new InvalidOperationError(`Light group command ${cmd.name} does not exist`, 'runLightGroupCommandAsync'));
+            if (isNaN(id)) return Promise.reject(new InvalidOperationError(`Light group ${id} does not exist`, 'runLightGroupCommandAsync'));
+            let grp = sys.lightGroups.getItemById(id);
+            let nop = sys.board.valueMaps.circuitActions.getValue(cmd.name);
+            let sgrp = state.lightGroups.getItemById(grp.id);
+            sgrp.action = nop;
+            sgrp.emitEquipmentChange();
+            switch (cmd.name) {
+                case 'colorset':
+                    await this.sequenceLightGroupAsync(id, 'colorset');
+                    break;
+                case 'colorswim':
+                    await this.sequenceLightGroupAsync(id, 'colorswim');
+                    break;
+                case 'colorhold':
+                    await this.setLightGroupThemeAsync(id, 190);
+                    break;
+                case 'colorrecall':
+                    await this.setLightGroupThemeAsync(id, 191);
+                    break;
+                case 'lightthumper':
+                    await this.setLightGroupThemeAsync(id, 208);
+                    break;
+            }
+            sgrp.action = 0;
+            sgrp.emitEquipmentChange();
+            return sgrp;
+        }
+        catch (err) { return Promise.reject(`Error runLightGroupCommandAsync ${err.message}`); }
+    }
+    public async runLightCommandAsync(obj: any): Promise<ICircuitState> {
+        // Do all our validation.
+        try {
+            let id = parseInt(obj.id, 10);
+            let cmd = typeof obj.command !== 'undefined' ? sys.board.valueMaps.lightCommands.findItem(obj.command) : { val: 0, name: 'undefined' };
+            if (cmd.val === 0) return Promise.reject(new InvalidOperationError(`Light command ${cmd.name} does not exist`, 'runLightCommandAsync'));
+            if (isNaN(id)) return Promise.reject(new InvalidOperationError(`Light ${id} does not exist`, 'runLightCommandAsync'));
+            let circ = sys.circuits.getItemById(id);
+            if (!circ.isActive) return Promise.reject(new InvalidOperationError(`Light circuit #${id} is not active`, 'runLightCommandAsync'));
+            let type = sys.board.valueMaps.circuitFunctions.transform(circ.type);
+            if (!type.isLight) return Promise.reject(new InvalidOperationError(`Circuit #${id} is not a light`, 'runLightCommandAsync'));
+            let nop = sys.board.valueMaps.circuitActions.getValue(cmd.name);
+            let slight = state.circuits.getItemById(circ.id);
+            slight.action = nop;
+            slight.emitEquipmentChange();
+            // Touch boards cannot change the theme or color of a single light.
+            slight.action = 0;
+            slight.emitEquipmentChange();
+            return slight;
+        }
+        catch (err) { return Promise.reject(`Error runLightCommandAsync ${err.message}`); }
     }
     public async setLightGroupThemeAsync(id = sys.board.equipmentIds.circuitGroups.start, theme: number): Promise<ICircuitState> {
         return new Promise<ICircuitState>((resolve, reject) => {
             const grp = sys.lightGroups.getItemById(id);
             const sgrp = state.lightGroups.getItemById(id);
             grp.lightingTheme = sgrp.lightingTheme = theme;
+            sgrp.action = sys.board.valueMaps.circuitActions.getValue('lighttheme');
+            sgrp.emitEquipmentChange();
             let out = Outbound.create({
                 action: 96,
                 payload: [theme, 0],
@@ -1575,6 +1686,7 @@ export class TouchCircuitCommands extends CircuitCommands {
                                     setImmediate(function () { sys.board.circuits.sequenceLightGroupAsync(grp.id, 'color'); });
                                 // other themes for magicstream?
                             }
+                            sgrp.action = 0;
                             sgrp.hasChanged = true; // Say we are dirty but we really are pure as the driven snow.
                             state.emitEquipmentChanges();
                             resolve(sgrp);
@@ -1676,7 +1788,7 @@ class TouchChlorinatorCommands extends ChlorinatorCommands {
             // Calculate an id for the chlorinator.  The messed up part is that if a chlorinator is not attached to the OCP, its address
             // cannot be set by the MUX.  This will have to wait.
             id = 1;
-        }        
+        }
         // If this is a Nixie chlorinator then go to the base class and handle it from there.
         if (chlor.master === 1) return super.setChlorAsync(obj);
         // RKS: I am not even sure this can be done with Touch as the master on the RS485 bus.
@@ -1727,7 +1839,7 @@ class TouchChlorinatorCommands extends ChlorinatorCommands {
                     utils.makeBool(superChlorinate) && superChlorHours > 0 ? superChlorHours + 128 : 0,  // We only want to set the superChlor when the user sends superChlor = true
                         0, 0, 0, 0, 0, 0, 0],
                     retries: 3,
-                    response: true, 
+                    response: true,
                     // scope: Math.random(),
                     onComplete: (err)=>{
                         if (err) {
@@ -1747,7 +1859,7 @@ class TouchChlorinatorCommands extends ChlorinatorCommands {
                     if (typeof reject === 'undefined' || typeof resolve === 'undefined') return;
                     reject(new EquipmentTimeoutError(`no chlor response in 7 seconds`, `chlorTimeOut`));
                     reject = undefined;
-                    
+
                 }, 3000);
             });
             await request153packet;
@@ -1792,7 +1904,7 @@ class TouchChlorinatorCommands extends ChlorinatorCommands {
             if (typeof _timeout !== 'undefined'){
                 clearTimeout(_timeout);
                 _timeout = undefined;
-            } 
+            }
             state.emitEquipmentChanges();
             return state.chlorinators.getItemById(id);
         } catch (err) {
@@ -2430,6 +2542,8 @@ class TouchChemControllerCommands extends ChemControllerCommands {
         chem.orp.tank.capacity = 6;
         let acidTankLevel = typeof data.ph !== 'undefined' && typeof data.ph.tank !== 'undefined' && typeof data.ph.tank.level !== 'undefined' ? parseInt(data.ph.tank.level, 10) : schem.ph.tank.level;
         let orpTankLevel = typeof data.orp !== 'undefined' && typeof data.orp.tank !== 'undefined' && typeof data.orp.tank.level !== 'undefined' ? parseInt(data.orp.tank.level, 10) : schem.orp.tank.level;
+        // OCP needs to set the IntelliChem as active so it knows that it exists
+
         return new Promise<ChemController>((resolve, reject) => {
             let out = Outbound.create({
                 action: 211,
@@ -2450,7 +2564,7 @@ class TouchChemControllerCommands extends ChemControllerCommands {
                         chem.cyanuricAcid = cyanuricAcid;
                         chem.alkalinity = alkalinity;
                         chem.borates = borates;
-                        chem.body = schem.body = body;
+                        chem.body = schem.body = body.val;
                         schem.isActive = chem.isActive = true;
                         chem.lsiRange.enabled = lsiRange.enabled;
                         chem.lsiRange.low = lsiRange.low;
@@ -2467,7 +2581,8 @@ class TouchChemControllerCommands extends ChemControllerCommands {
                         chem.address = schem.address = address;
                         chem.name = schem.name = name;
                         chem.flowSensor.enabled = false;
-                        resolve(chem);
+                        sys.board.bodies.setBodyAsync(sys.bodies.getItemById(1, false))
+                          .then(()=>{resolve(chem)});
                     }
                 }
             });
@@ -2491,45 +2606,48 @@ class TouchChemControllerCommands extends ChemControllerCommands {
     public async deleteChemControllerAsync(data: any): Promise<ChemController> {
         let id = typeof data.id !== 'undefined' ? parseInt(data.id, 10) : -1;
         if (typeof id === 'undefined' || isNaN(id)) return Promise.reject(new InvalidEquipmentIdError(`Invalid Chem Controller Id`, id, 'chemController'));
-        let chem = sys.chemControllers.getItemById(id);
+        let chem = sys.board.chemControllers.findChemController(data);
         if (chem.master === 1) return super.deleteChemControllerAsync(data);
         return new Promise<ChemController>((resolve, reject) => {
-            let out = Outbound.create({
-                action: 211,
-                response: Response.create({ protocol: Protocol.IntelliChem, action: 1, payload: [211] }),
-                retries: 3,
-                payload: [],
-                onComplete: (err) => {
-                    if (err) { reject(err); }
-                    else {
-                        let schem = state.chemControllers.getItemById(id);
-                        chem.isActive = false;
-                        chem.ph.tank.capacity = chem.orp.tank.capacity = 6;
-                        chem.ph.tank.units = chem.orp.tank.units = '';
-                        schem.isActive = false;
-                        sys.chemControllers.removeItemById(id);
-                        state.chemControllers.removeItemById(id);
-                        resolve(chem);
-                    }
+        let out = Outbound.create({
+            action: 211,
+            response: Response.create({ protocol: Protocol.IntelliChem, action: 1, payload: [211] }),
+            retries: 3,
+            payload: [],
+            onComplete: (err) => {
+                if (err) { reject(err); }
+                else {
+                    let schem = state.chemControllers.getItemById(id);
+                    chem.isActive = false;
+                    chem.ph.tank.capacity = chem.orp.tank.capacity = 6;
+                    chem.ph.tank.units = chem.orp.tank.units = '';
+                    schem.isActive = false;
+                    sys.board.bodies.setBodyAsync(sys.bodies.getItemById(1, false))
+                        .then(()=>{
+                            sys.chemControllers.removeItemById(id);
+                            state.chemControllers.removeItemById(id);
+                            resolve(chem);
+                        })
+                        .catch(()=>{reject(err);});
                 }
-            });
-            // I think this payload should delete the controller on Touch.
-            out.insertPayloadBytes(0, 0, 22);
-            out.setPayloadByte(0, chem.address - 144);
-            out.setPayloadByte(1, Math.floor((chem.ph.setpoint * 100) / 256) || 0);
-            out.setPayloadByte(2, Math.round((chem.ph.setpoint * 100) % 256) || 0);
-            out.setPayloadByte(3, Math.floor(chem.orp.setpoint / 256) || 0);
-            out.setPayloadByte(4, Math.round(chem.orp.setpoint % 256) || 0);
-            out.setPayloadByte(5, 0);
-            out.setPayloadByte(6, 0);
-            out.setPayloadByte(7, Math.floor(chem.calciumHardness / 256) || 0);
-            out.setPayloadByte(8, Math.round(chem.calciumHardness % 256) || 0);
-            out.setPayloadByte(9, chem.cyanuricAcid || 0);
-            out.setPayloadByte(11, Math.floor(chem.alkalinity / 256) || 0);
-            out.setPayloadByte(12, Math.round(chem.alkalinity % 256) || 0);
-            out.setPayloadByte(13, 20);
-            conn.queueSendMessage(out);
+            }
         });
+        // I think this payload should delete the controller on Touch.
+        out.insertPayloadBytes(0, 0, 22);
+        out.setPayloadByte(0, chem.address - 144 || 0);
+        out.setPayloadByte(1, Math.floor((chem.ph.setpoint * 100) / 256) || 0);
+        out.setPayloadByte(2, Math.round((chem.ph.setpoint * 100) % 256) || 0);
+        out.setPayloadByte(3, Math.floor(chem.orp.setpoint / 256) || 0);
+        out.setPayloadByte(4, Math.round(chem.orp.setpoint % 256) || 0);
+        out.setPayloadByte(5, 0);
+        out.setPayloadByte(6, 0);
+        out.setPayloadByte(7, Math.floor(chem.calciumHardness / 256) || 0);
+        out.setPayloadByte(8, Math.round(chem.calciumHardness % 256) || 0);
+        out.setPayloadByte(9, chem.cyanuricAcid || 0);
+        out.setPayloadByte(11, Math.floor(chem.alkalinity / 256) || 0);
+        out.setPayloadByte(12, Math.round(chem.alkalinity % 256) || 0);
+        out.setPayloadByte(13, 20);
+        conn.queueSendMessage(out);
+    });
     }
-
 }

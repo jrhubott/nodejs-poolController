@@ -217,7 +217,7 @@ export class ExternalMessage {
                     if (group.isActive) {
                         for (let i = 0; i < 16; i++) {
                             let circuitId = msg.extractPayloadByte(i + 6);
-                            let circuit = group.circuits.getItemById(i + 1, circuitId !== 255);
+                            let circuit = group.circuits.getItemById(i + 1, circuitId < 255);
                             if (circuitId === 255) group.circuits.removeItemById(i + 1);
                             circuit.circuit = circuitId + 1;
 
@@ -429,13 +429,13 @@ export class ExternalMessage {
                         // [11] = No sequencing underway.
                         switch (byte) {
                             case 0: // Sync
-                                lg.action = 1;
+                                lg.action = sys.board.valueMaps.circuitActions.getValue('colorsync');
                                 break;
                             case 1: // Color swim
-                                lg.action = 3;
+                                lg.action = sys.board.valueMaps.circuitActions.getValue('colorswim');
                                 break;
                             case 2: // Color set
-                                lg.action = 2;
+                                lg.action = sys.board.valueMaps.circuitActions.getValue('colorset');
                                 break;
                             default:
                                 lg.action = 0;
@@ -500,11 +500,14 @@ export class ExternalMessage {
         let startTime = msg.extractPayloadInt(3);
         let endTime = msg.extractPayloadInt(5);
         let circuit = msg.extractPayloadByte(7) + 1;
-        let cfg = sys.schedules.getItemById(schedId, circuit !== 256 && startTime !== 0 && endTime !== 0);
-        cfg.isActive = (circuit !== 256 && startTime !== 0 && endTime !== 0);
+        let isActive = (msg.extractPayloadByte(8) & 128) === 128; // Inactive schedules do not have bit 8 set.
+        let cfg = sys.schedules.getItemById(schedId, isActive);
+        let s = state.schedules.getItemById(schedId, cfg.isActive);
+        //cfg.isActive = (circuit !== 256);
         cfg.startTime = startTime;
         cfg.endTime = endTime;
         cfg.circuit = circuit;
+        cfg.isActive = isActive;
         let byte = msg.extractPayloadByte(8);
         cfg.scheduleType = (byte & 1 & 0xFF) === 1 ? 0 : 128;
         if ((byte & 4 & 0xFF) === 4) cfg.startTimeType = 1;
@@ -525,7 +528,6 @@ export class ExternalMessage {
         cfg.heatSource = hs;
         cfg.heatSetpoint = msg.extractPayloadByte(14);
         cfg.coolSetpoint = msg.extractPayloadByte(15);
-        let s = state.schedules.getItemById(schedId, cfg.isActive);
         if (cfg.isActive) {
             let s = state.schedules.getItemById(schedId, cfg.isActive);
             s.isActive = cfg.isActive = true;
@@ -773,7 +775,7 @@ export class ExternalMessage {
                 break;
             case 21: // Body 2 Cool Setpoint
                 body = sys.bodies.getItemById(2, false);
-                body.setPoint = msg.extractPayloadByte(24);
+                body.coolSetpoint = msg.extractPayloadByte(24);
                 state.temps.bodies.getItemById(2).coolSetpoint = body.coolSetpoint;
                 state.emitEquipmentChanges();
                 msg.isProcessed = true;

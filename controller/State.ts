@@ -7,7 +7,7 @@ published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 
 This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
+but WITHOUT ANY WARRANTY; without even the implied warranty of1
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 GNU Affero General Public License for more details.
 
@@ -26,7 +26,7 @@ import { sys, Chemical, ChemController } from './Equipment';
 import { versionCheck } from '../config/VersionCheck';
 import { EquipmentStateMessage } from './comms/messages/status/EquipmentStateMessage';
 import { DataLogger, DataLoggerEntry, IDataLoggerEntry } from '../logger/DataLogger';
-
+import { delayMgr } from './Lockouts';
 
 export class State implements IState {
     statePath: string;
@@ -140,6 +140,7 @@ export class State implements IState {
             _state.filters = this.filters.getExtended();
             _state.schedules = this.schedules.getExtended();
             _state.chemControllers = this.chemControllers.getExtended();
+            _state.delays = delayMgr.serialize();
             return _state;
         }
         else {
@@ -153,7 +154,6 @@ export class State implements IState {
                     return extend(true, [], this.data[section] || []);
                 else
                     return extend(true, {}, this.data[section] || {});
-
         }
     }
     public async stopAsync() {
@@ -212,7 +212,8 @@ export class State implements IState {
             sunrise: self.data.sunrise || '',
             sunset: self.data.sunset || '',
             alias: sys.general.alias,
-            freeze: utils.makeBool(self.data.freeze)
+            freeze: utils.makeBool(self.data.freeze),
+            valveMode: self.data.valveMode || {},
         };
     }
     public emitAllEquipmentChanges() {
@@ -284,6 +285,14 @@ export class State implements IState {
         let m = sys.board.valueMaps.panelModes.transform(val);
         if (m.val !== this.mode) {
             this.data.mode = m;
+            this.hasChanged = true;
+        }
+    }
+    public get valveMode(): number { return typeof this.data.valveMode !== 'undefined' ? this.data.valveMode.val : 0; }
+    public set valveMode(val: number) {
+        let m = sys.board.valueMaps.valveModes.transform(val);
+        if (m.val !== this.valveMode) {
+            this.data.valveMode = m;
             this.hasChanged = true;
         }
     }
@@ -486,12 +495,16 @@ export interface ICircuitState {
     name: string;
     nameId?: number;
     isOn: boolean;
+    startTime?: Timestamp;
     endTime: Timestamp;
     lightingTheme?: number;
+    action?: number;
     emitEquipmentChange();
     get(bCopy?: boolean);
     showInFeatures?: boolean;
     isActive?: boolean;
+    startDelay?: boolean;
+    stopDelay?: boolean;
 }
 
 interface IEqStateCreator<T> { ctor(data: any, name: string, parent?): T; }
@@ -883,7 +896,9 @@ export class PumpState extends EqState {
         if (typeof this.data.status === 'undefined') {
             this.data.status = { name: 'ok', desc: 'Ok', val: 0 };
         }
+        if (typeof this.data.pumpOnDelay === 'undefined') this.data.pumpOnDelay = false;
     }
+    private _pumpOnDelayTimer: NodeJS.Timeout;
     private _threshold = 0.05;
     private exceedsThreshold(origVal: number, newVal: number) {
         return Math.abs((newVal - origVal) / origVal) > this._threshold;
@@ -943,6 +958,23 @@ export class PumpState extends EqState {
     }
     public get time(): number { return this.data.time; }
     public set time(val: number) { this.setDataVal('time', val, false); }
+    public get pumpOnDelay() { return this.data.pumpOnDelay; }
+    public set pumpOnDelay(val: boolean) {
+        if (val === false) {
+            if (typeof this._pumpOnDelayTimer !== 'undefined') clearTimeout(this._pumpOnDelayTimer);
+            this._pumpOnDelayTimer = undefined;
+        }
+        this.setDataVal('pumpOnDelay', val);
+    }
+    public setPumpOnDelayTimeout(delay: number) {
+        this.pumpOnDelay = true;
+        logger.info(`Pump ON Delay ${this.name} for ${delay / 1000} seconds`);
+        this._pumpOnDelayTimer = setTimeout(() => {
+            logger.info(`Pump ON Delay ${this.name} expired`);
+            this.pumpOnDelay = false;
+        }, delay);
+    }
+   
     public getExtended() {
         let pump = this.get(true);
         let cpump = sys.pumps.getItemById(pump.id);
@@ -991,9 +1023,9 @@ export class ScheduleState extends EqState {
         if (typeof this.data.startDate === 'undefined') this._startDate = new Date();
         else this._startDate = new Date(this.data.startDate);
         if (isNaN(this._startDate.getTime())) this._startDate = new Date();
-        if (typeof this.data.startTimeType === 'undefined') this.data.startTimeType = 0;
-        if (typeof this.data.endTimeType === 'undefined') this.data.endTimeType = 0;
-        if (typeof this.data.display === 'undefined') this.display = 0;
+        if (typeof this.data.startTimeType === 'undefined') this.data.startTimeType = sys.board.valueMaps.scheduleTimeTypes.transform(0);
+        if (typeof this.data.endTimeType === 'undefined') this.data.endTimeType = sys.board.valueMaps.scheduleTimeTypes.transform(0);
+        if (typeof this.data.display === 'undefined') this.data.display = sys.board.valueMaps.scheduleDisplayTypes.transform(0);
     }
     private _startDate: Date = new Date();
     public get startDate(): Date { return this._startDate; }
@@ -1205,7 +1237,7 @@ export class LightGroupState extends EqState implements ICircuitGroupState, ICir
     public get action(): number { return typeof this.data.action !== 'undefined' ? this.data.action.val : 0; }
     public set action(val: number) {
         if (this.action !== val || typeof this.data.action === 'undefined') {
-            this.data.action = sys.board.valueMaps.intellibriteActions.transform(val);
+            this.data.action = sys.board.valueMaps.circuitActions.transform(val);
             this.hasChanged = true;
         }
     }
@@ -1237,7 +1269,7 @@ export class LightGroupState extends EqState implements ICircuitGroupState, ICir
         let sgrp = this.get(true); // Always operate on a copy.
         sgrp.circuits = [];
         if (typeof sgrp.lightingTheme === 'undefined') sgrp.lightingTheme = sys.board.valueMaps.lightThemes.transformByName('white');
-        if (typeof sgrp.action === 'undefined') sgrp.action = sys.board.valueMaps.intellibriteActions.transform(0);
+        if (typeof sgrp.action === 'undefined') sgrp.action = sys.board.valueMaps.circuitActions.transform(0);
         let cgrp = sys.circuitGroups.getItemById(this.id);
         for (let i = 0; i < cgrp.circuits.length; i++) {
             let lgc = cgrp.circuits.getItemByIndex(i).get(true);
@@ -1261,6 +1293,16 @@ export class BodyTempStateCollection extends EqStateCollection<BodyTempState> {
             if (this.data[i].isOn) return this.createItem(this.data[i]);
         }
         return undefined;
+    }
+    public getBodyByCircuitId(circuitId: number) {
+        let b = this.data.find(x => x.circuit === circuitId);
+        if (typeof b === 'undefined') {
+            let circ = sys.circuits.getItemById(circuitId);
+            // Find our body by circuit function.
+            let cfn = sys.board.valueMaps.circuitFunctions.get(circ.type);
+            if (typeof cfn.body !== 'undefined') b = this.data.find(x => x.id === cfn.body);
+        }
+        return typeof b !== 'undefined' ? this.createItem(b) : undefined;
     }
     public cleanupState() {
         for (let i = this.data.length - 1; i >= 0; i--) {
@@ -1289,6 +1331,9 @@ export class BodyTempState extends EqState {
     public initData() {
         if (typeof this.data.heaterOptions === 'undefined') this.data.heaterOptions = { total: 0 };
         if (typeof this.data.isCovered === 'undefined') this.data.isCovered = false;
+        if (typeof this.heaterCooldownDelay === 'undefined') this.data.heaterCooldownDelay = false;
+        if (typeof this.data.startDelay === 'undefined') this.data.startDelay = false;
+        if (typeof this.data.stopDelay === 'undefined') this.data.stopDelay = false;
     }
     public get id(): number { return this.data.id; }
     public set id(val: number) { this.setDataVal('id', val); }
@@ -1327,8 +1372,19 @@ export class BodyTempState extends EqState {
     public set coolSetpoint(val: number) { this.setDataVal('coolSetpoint', val); }
     public get isOn(): boolean { return this.data.isOn; }
     public set isOn(val: boolean) { this.setDataVal('isOn', val); }
+    public get startDelay(): boolean { return this.data.startDelay; }
+    public set startDelay(val: boolean) { this.setDataVal('startDelay', val); }
+    public get stopDelay(): boolean { return this.data.stopDelay; }
+    public set stopDelay(val: boolean) { this.setDataVal('stopDelay', val); }
+
     public get isCovered(): boolean { return this.data.isCovered; }
     public set isCovered(val: boolean) { this.setDataVal('isCovered', val); }
+    // RKS: Heater cooldown delays force the current valve and body configuration until the
+    // heater cooldown expires.  This occurs at the pool level but it is triggered by the heater attached
+    // to the body.  Unfortunately, I think we can only detect this condition in Nixie as there really isn't an
+    // indicator with Pentair OCPs.  This is triggered in NixieBoard and managed by the delayMgr.
+    public get heaterCooldownDelay(): boolean { return this.data.heaterCooldownDelay; }
+    public set heaterCooldownDelay(val: boolean) { this.setDataVal('heaterCooldownDelay', val); }
     public emitData(name: string, data: any) { webApp.emitToClients('body', this.data); }
     // RKS: This is a very interesting object because we have a varied object.  Type safety rules should not apply
     // here as the heater types are specific to the installed equipment.  The reason is because it has no meaning without the body and the calculation of it should
@@ -1355,7 +1411,7 @@ export class BodyTempState extends EqState {
 }
 export class TemperatureState extends EqState {
     public initData() {
-        if (typeof this.data.units === 'undefined') this.units = 0;
+        if (typeof this.data.units === 'undefined') this.data.units = sys.board.valueMaps.tempUnits.transform(0);
     }
     public get waterSensor1(): number { return this.data.waterSensor1; }
     public set waterSensor1(val: number) { this.setDataVal('waterSensor1', val); }
@@ -1414,16 +1470,36 @@ export class HeaterStateCollection extends EqStateCollection<HeaterState> {
 }
 export class HeaterState extends EqState {
     public dataName: string = 'heater';
+    public initData() {
+        if (typeof this.data.startupDelay === 'undefined') this.data.startupDelay = false;
+        if (typeof this.data.shutdownDelay === 'undefined') this.data.shutdownDelay = false;
+    }
     public get id(): number { return this.data.id; }
     public set id(val: number) { this.data.id = val; }
     public get name(): string { return this.data.name; }
     public set name(val: string) { this.setDataVal('name', val); }
     public get isOn(): boolean { return this.data.isOn; }
-    public set isOn(val: boolean) { this.setDataVal('isOn', val); }
+    public set isOn(val: boolean) {
+        if (val !== this.data.isOn) {
+            if (val) this.startTime = new Timestamp();
+            else this.endTime = new Timestamp();
+        }
+        this.setDataVal('isOn', val);
+    }
+    public get startTime(): Timestamp {
+        if (typeof this.data.startTime === 'undefined') return undefined;
+        return new Timestamp(this.data.startTime);
+    }
+    public set startTime(val: Timestamp) { typeof val !== 'undefined' ? this.setDataVal('startTime', Timestamp.toISOLocal(val.toDate())) : this.setDataVal('startTime', undefined); }
+
+    public get endTime(): Timestamp {
+        if (typeof this.data.endTime === 'undefined') return undefined;
+        return new Timestamp(this.data.endTime);
+    }
+    public set endTime(val: Timestamp) { typeof val !== 'undefined' ? this.setDataVal('endTime', Timestamp.toISOLocal(val.toDate())) : this.setDataVal('endTime', undefined); }
+
     public get isCooling(): boolean { return this.data.isCooling; }
     public set isCooling(val: boolean) { this.setDataVal('isCooling', val); }
-    //public get isVirtual(): boolean { return this.data.isVirtual; }
-    //public set isVirtual(val: boolean) { this.setDataVal('isVirtual', val); }
     public get type(): number | any { return typeof this.data.type !== 'undefined' ? this.data.type.val : 0; }
     public set type(val: number | any) {
         if (this.type !== val) {
@@ -1438,6 +1514,13 @@ export class HeaterState extends EqState {
             this.hasChanged = true;
         }
     }
+    public get startupDelay(): boolean { return this.data.startupDelay; }
+    public set startupDelay(val: boolean) { this.setDataVal('startupDelay', val); }
+    public get shutdownDelay(): boolean { return this.data.shutdownDelay; }
+    public set shutdownDelay(val: boolean) { this.setDataVal('shutdownDelay', val); }
+    public get bodyId(): number { return this.data.bodyId || 0 }
+    public set bodyId(val: number) { this.setDataVal('bodyId', val); }
+
 }
 export class FeatureStateCollection extends EqStateCollection<FeatureState> {
     public createItem(data: any): FeatureState { return new FeatureState(data); }
@@ -1518,6 +1601,8 @@ export class VirtualCircuitState extends EqState implements ICircuitState {
         return new Timestamp(this.data.endTime);
     }
     public set endTime(val: Timestamp) { typeof val !== 'undefined' ? this.setDataVal('endTime', Timestamp.toISOLocal(val.toDate())) : this.setDataVal('endTime', undefined); }
+    public get isActive(): boolean { return this.data.isActive; }
+    public set isActive(val: boolean) { this.setDataVal('isActive', val); }
 }
 export class VirtualCircuitStateCollection extends EqStateCollection<VirtualCircuitState> {
     public createItem(data: any): VirtualCircuitState { return new VirtualCircuitState(data); }
@@ -1563,6 +1648,8 @@ export class CircuitState extends EqState implements ICircuitState {
     public dataName = 'circuit';
     public initData() {
         if (typeof this.data.freezeProtect === 'undefined') this.data.freezeProtect = false;
+        if (typeof this.data.action === 'undefined') this.data.action = sys.board.valueMaps.circuitActions.transform(0);
+        if (typeof this.data.type === 'undefined') this.data.type = sys.board.valueMaps.circuitFunctions.transform(0);
     }
     public get id(): number { return this.data.id; }
     public set id(val: number) { this.data.id = val; }
@@ -1570,10 +1657,21 @@ export class CircuitState extends EqState implements ICircuitState {
     public set name(val: string) { this.setDataVal('name', val); }
     public get nameId(): number { return this.data.nameId; }
     public set nameId(val: number) { this.setDataVal('nameId', val); }
+    public get action(): number { return typeof this.data.action !== 'undefined' ? this.data.action.val : 0; }
+    public set action(val: number) {
+        if (this.action !== val || typeof this.data.action === 'undefined') {
+            this.data.action = sys.board.valueMaps.circuitActions.transform(val);
+            this.hasChanged = true;
+        }
+    }
     public get showInFeatures(): boolean { return this.data.showInFeatures; }
     public set showInFeatures(val: boolean) { this.setDataVal('showInFeatures', val); }
     public get isOn(): boolean { return this.data.isOn; }
-    public set isOn(val: boolean) { this.setDataVal('isOn', val); }
+    public set isOn(val: boolean) {
+        if (val && !this.data.isOn) this.startTime = new Timestamp();
+        else if (!val) this.startTime = undefined;
+        this.setDataVal('isOn', val);
+    }
     public get type() { return typeof (this.data.type) !== 'undefined' ? this.data.type.val : -1; }
     public set type(val: number) {
         if (this.type !== val) {
@@ -1599,6 +1697,12 @@ export class CircuitState extends EqState implements ICircuitState {
             this.hasChanged = true;
         }
     }
+    public get startTime(): Timestamp {
+        if (typeof this.data.startTime === 'undefined') return undefined;
+        return new Timestamp(this.data.startTime);
+    }
+    public set startTime(val: Timestamp) { typeof val !== 'undefined' ? this.setDataVal('startTime', Timestamp.toISOLocal(val.toDate())) : this.setDataVal('startTime', undefined); }
+
     public get endTime(): Timestamp {
         if (typeof this.data.endTime === 'undefined') return undefined;
         return new Timestamp(this.data.endTime);
@@ -1610,6 +1714,16 @@ export class CircuitState extends EqState implements ICircuitState {
     public set freezeProtect(val: boolean) { this.setDataVal('freezeProtect', val); }
     public get isActive(): boolean { return this.data.isActive; }
     public set isActive(val: boolean) { this.setDataVal('isActive', val); }
+    // The properties below are for delays and lockouts.  Manual or scheduled
+    // actions cannot be performed when the flags below are set.
+    public get startDelay(): boolean { return this.data.startDelay; }
+    public set startDelay(val: boolean) { this.setDataVal('startDelay', val); }
+    public get stopDelay(): boolean { return this.data.stopDelay; }
+    public set stopDelay(val: boolean) { this.setDataVal('stopDelay', val); }
+    public get lockoutOn(): boolean { return this.data.lockoutOn; }
+    public set lockoutOn(val: boolean) { this.setDataVal('lockoutOn', val); }
+    public get lockoutOff(): boolean { return this.data.lockoutOff; }
+    public set lockoutOff(val: boolean) { this.setDataVal('lockoutOff', val); }
 }
 export class ValveStateCollection extends EqStateCollection<ValveState> {
     public createItem(data: any): ValveState { return new ValveState(data); }
@@ -1870,7 +1984,9 @@ export class ChemControllerState extends EqState {
         if (typeof this.data.orp === 'undefined') this.data.orp = {};
         if (typeof this.data.ph === 'undefined') this.data.ph = {};
         if (typeof this.data.flowSensor === 'undefined') this.data.flowSensor = {};
-        if (typeof this.data.type === 'undefined') { this.type = 1; }
+        if (typeof this.data.type === 'undefined') {
+            this.data.type = sys.board.valueMaps.chemControllerTypes.transform(1);
+        }
         else if (typeof this.data.type.ph === 'undefined') {
             this.data.type = sys.board.valueMaps.chemControllerTypes.transform(this.type);
         }
@@ -2086,7 +2202,7 @@ export class ChemControllerState extends EqState {
     public get flowSensor(): ChemicalFlowSensorState { return new ChemicalFlowSensorState(this.data, 'flowSensor', this); }
     public get warnings(): ChemControllerStateWarnings { return new ChemControllerStateWarnings(this.data, 'warnings', this); }
     public get alarms(): ChemControllerStateAlarms { return new ChemControllerStateAlarms(this.data, 'alarms', this); }
-    public get siCalcType(): number { return this.data.siCalcType; }
+    public get siCalcType(): number { return typeof this.data.siCalcType === 'undefined' ? 0 : this.data.siCalcType.val; }
     public set siCalcType(val: number) {
         if (this.siCalcType !== val) {
             this.data.siCalcType = sys.board.valueMaps.siCalcTypes.transform(val);
@@ -2126,6 +2242,7 @@ export class ChemicalState extends ChildEqState {
         if (typeof this.data.flowDelay === 'undefined') this.data.flowDelay = false;
         if (typeof this.data.dosingStatus === 'undefined') this.dosingStatus = 2;
         if (typeof this.data.enabled === 'undefined') this.data.enabled = true;
+        if (typeof this.data.freezeProtect === 'undefined') this.data.freezeProtect = false;
     }
     public getConfig(): Chemical { return; }
     public calcDoseHistory(): number {
@@ -2232,6 +2349,8 @@ export class ChemicalState extends ChildEqState {
     public get demandHistory() { return new ChemicalDemandState(this.data, 'demandHistory', this) };
     public get enabled(): boolean { return this.data.enabled; }
     public set enabled(val: boolean) { this.data.enabled = val; }
+    public get freezeProtect(): boolean { return this.data.freezeProtect; }
+    public set freezeProtect(val: boolean) { this.data.freezeProtect = val; }
     public get level(): number { return this.data.level; }
     public set level(val: number) { this.setDataVal('level', val); }
     public get setpoint(): number { return this.data.setpoint; }
@@ -2289,8 +2408,8 @@ export class ChemicalState extends ChildEqState {
 }
 export class ChemicalPhState extends ChemicalState {
     public initData() {
-        // if (typeof this.data.chemType === 'undefined') this.data.chemType === 'acid';  // RSG 10-23-21 - Only a getter; don't need to set this.
         super.initData();
+        if (typeof this.data.chemType === 'undefined') this.data.chemType = 'none';
     }
     public getConfig() {
         let schem = this.chemController;
@@ -2299,7 +2418,8 @@ export class ChemicalPhState extends ChemicalState {
             return typeof chem !== 'undefined' ? chem.ph : undefined;
         }
     }
-    public get chemType() { return 'acid'; }
+    public get chemType() { return this.data.chemType; }
+    public set chemType(val: string) { this.setDataVal('chemType', val); }
     public get probe(): ChemicalProbePHState { return new ChemicalProbePHState(this.data, 'probe', this); }
     public getExtended() {
         let chem = super.getExtended();
@@ -2348,7 +2468,7 @@ export class ChemicalPhState extends ChemicalState {
 export class ChemicalORPState extends ChemicalState {
     public initData() {
         if (typeof this.data.probe === 'undefined') this.data.probe = {};
-        if (typeof this.data.chemType === 'undefined') this.data.chemType === 'orp';
+        if (typeof this.data.chemType === 'undefined') this.data.chemType = 'none';
         if (typeof this.data.useChlorinator === 'undefined') this.data.useChlorinator = false;
         super.initData();
         // Load up the 24 hours doseHistory.
@@ -2361,6 +2481,7 @@ export class ChemicalORPState extends ChemicalState {
         //});
     }
     public get chemType() { return 'orp'; }
+    public set chemType(val) { this.setDataVal('chemType', val); }
     public get probe() { return new ChemicalProbeORPState(this.data, 'probe', this); }
     public get useChlorinator(): boolean { return utils.makeBool(this.data.useChlorinator); }
     public set useChlorinator(val: boolean) { this.setDataVal('useChlorinator', val); }
@@ -2639,20 +2760,21 @@ export class ChemControllerStateAlarms extends ChildEqState {
     //ctor(data): ChemControllerStateWarnings { return new ChemControllerStateWarnings(data, name || 'alarms'); }
     public dataName = 'chemControllerAlarms';
     public initData() {
-        if (typeof this.data.flow === 'undefined') this.flow = 0;
-        if (typeof this.data.pH === 'undefined') this.pH = 0;
-        if (typeof this.data.orp === 'undefined') this.orp = 0;
-        if (typeof this.data.pHTank === 'undefined') this.pHTank = 0;
-        if (typeof this.data.orpTank === 'undefined') this.orpTank = 0;
-        if (typeof this.data.probeFault === 'undefined') this.probeFault = 0;
-        if (typeof this.data.pHProbeFault === 'undefined') this.pHProbeFault = 0;
-        if (typeof this.data.orpProbeFault === 'undefined') this.orpProbeFault = 0;
-        if (typeof this.data.pHPumpFault === 'undefined') this.pHPumpFault = 0;
-        if (typeof this.data.orpPumpFault === 'undefined') this.orpPumpFault = 0;
-        if (typeof this.data.chlorFault === 'undefined') this.chlorFault = 0;
-        if (typeof this.data.bodyFault === 'undefined') this.bodyFault = 0;
-        if (typeof this.data.flowSensorFault === 'undefined') this.flowSensorFault = 0;
-        if (typeof this.data.comms === 'undefined') this.comms = 0;
+        if (typeof this.data.flow === 'undefined') this.data.flow = sys.board.valueMaps.chemControllerAlarms.transform(0);
+        if (typeof this.data.pH === 'undefined') this.data.pH = sys.board.valueMaps.chemControllerAlarms.transform(0);
+        if (typeof this.data.orp === 'undefined') this.data.orp = sys.board.valueMaps.chemControllerAlarms.transform(0);
+        if (typeof this.data.pHTank === 'undefined') this.data.pHTank = sys.board.valueMaps.chemControllerAlarms.transform(0);
+        if (typeof this.data.orpTank === 'undefined') this.data.orpTank = sys.board.valueMaps.chemControllerAlarms.transform(0);
+        if (typeof this.data.probeFault === 'undefined') this.data.probeFault = sys.board.valueMaps.chemControllerAlarms.transform(0);
+        if (typeof this.data.pHProbeFault === 'undefined') this.data.pHProbeFault = sys.board.valueMaps.chemControllerAlarms.transform(0);
+        if (typeof this.data.orpProbeFault === 'undefined') this.data.orpProbeFault = sys.board.valueMaps.chemControllerAlarms.transform(0);
+        if (typeof this.data.pHPumpFault === 'undefined') this.data.pHPumpFault = sys.board.valueMaps.chemControllerHardwareFaults.transform(0);
+        if (typeof this.data.orpPumpFault === 'undefined') this.data.orpPumpFault = sys.board.valueMaps.chemControllerHardwareFaults.transform(0);
+        if (typeof this.data.chlorFault === 'undefined') this.data.chlorFault = sys.board.valueMaps.chemControllerHardwareFaults.transform(0);
+        if (typeof this.data.bodyFault === 'undefined') this.data.bodyFault = sys.board.valueMaps.chemControllerHardwareFaults.transform(0);
+        if (typeof this.data.flowSensorFault === 'undefined') this.data.flowSensorFault = sys.board.valueMaps.chemControllerHardwareFaults.transform(0);
+        if (typeof this.data.comms === 'undefined') this.data.comms = sys.board.valueMaps.chemControllerStatus.transform(0);
+        if (typeof this.data.freezeProtect === 'undefined') this.data.freezeProtect = sys.board.valueMaps.chemControllerAlarms.transform(0);
     }
     public get flow(): number { return typeof this.data.flow === 'undefined' ? undefined : this.data.flow.val; }
     public set flow(val: number) {
@@ -2745,7 +2867,6 @@ export class ChemControllerStateAlarms extends ChildEqState {
             this.hasChanged = true;
         }
     }
-
     public get comms(): number { return typeof this.data.comms === 'undefined' ? undefined : this.data.comms.val; }
     public set comms(val: number) {
         if (this.comms !== val) {
@@ -2753,6 +2874,14 @@ export class ChemControllerStateAlarms extends ChildEqState {
             this.hasChanged = true;
         }
     }
+    public get freezeProtect(): number { return typeof this.data.freezeProtect === 'undefined' ? undefined : this.data.freezeProtect.val; }
+    public set freezeProtect(val: number) {
+        if (this.freezeProtect !== val) {
+            this.data.freezeProtect = sys.board.valueMaps.chemControllerAlarms.transform(val);
+            this.hasChanged = true;
+        }
+    }
+
 }
 export class AppVersionState extends EqState {
     public get nextCheckTime(): string { return this.data.nextCheckTime; }

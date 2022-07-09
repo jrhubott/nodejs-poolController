@@ -37,6 +37,26 @@
               "name": "solarTemp",
               "value": "@bind=data.solar;",
               "type": "int"
+            },
+            {
+              "name": "waterSensor1",
+              "value": "@bind=data.waterSensor1;",
+              "type": "float"
+            },
+            {
+              "name": "waterSensor2",
+              "value": "@bind=data.waterSensor2;",
+              "type": "float"
+            },
+            {
+              "name": "waterSensor3",
+              "value": "@bind=data.waterSensor3;",
+              "type": "float"
+            },
+            {
+              "name": "waterSensor4",
+              "value": "@bind=data.waterSensor4;",
+              "type": "float"
             }
           ]
         }
@@ -274,6 +294,16 @@
               "name": "high tolerance",
               "value": "@bind=vars.cfg.ph.tolerance.high;",
               "type": "int"
+            },
+            {
+              "name": "high threshold",
+              "value": "@bind=vars.cfg.ph.tolerance.high;",
+              "type": "float"
+            },
+            {
+              "name": "low threshold",
+              "value": "@bind=vars.cfg.ph.tolerance.low;",
+              "type": "float"
             },
             {
               "name": "tolerance enabled int",
@@ -584,6 +614,11 @@
               "type": "int"
             },
             {
+              "name": "warning: pH daily limit reached",
+              "value": "@bind=data.warnings.pHDailyLimitReached.val;",
+              "type": "int"
+            },
+            {
               "name": "warning: water chemistry",
               "value": "@bind=data.warnings.waterChemistry.val;",
               "type": "int"
@@ -789,7 +824,7 @@
     },
     {
       "name": "pump",
-      "description": "Bind circuit emit",
+      "description": "Pump state emit",
       "points": [
         {
           "measurement": "pumps",
@@ -820,6 +855,11 @@
             {
               "name": "gpm",
               "value": "@bind=data.gpm;",
+              "type": "int"
+            },
+            {
+              "name": "flow",
+              "value": "@bind=data.flow;",
               "type": "int"
             },
             {

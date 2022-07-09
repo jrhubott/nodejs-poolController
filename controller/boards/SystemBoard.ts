@@ -19,10 +19,11 @@ import { logger } from '../../logger/Logger';
 import { Message, Outbound } from '../comms/messages/Messages';
 import { Timestamp, utils } from '../Constants';
 import { Body, ChemController, Chlorinator, Circuit, CircuitGroup, CircuitGroupCircuit, ConfigVersion, ControllerType, CustomName, CustomNameCollection, EggTimer, Equipment, Feature, Filter, General, Heater, ICircuit, LightGroup, LightGroupCircuit, Location, Options, Owner, PoolSystem, Pump, Schedule, sys, TempSensorCollection, Valve } from '../Equipment';
-import { EquipmentNotFoundError, InvalidEquipmentDataError, InvalidEquipmentIdError } from '../Errors';
+import { EquipmentNotFoundError, InvalidEquipmentDataError, InvalidEquipmentIdError, BoardProcessError, InvalidOperationError } from '../Errors';
 import { ncp } from "../nixie/Nixie";
 import { BodyTempState, ChemControllerState, ChlorinatorState, CircuitGroupState, FilterState, ICircuitGroupState, ICircuitState, LightGroupState, ScheduleState, state, TemperatureState, ValveState, VirtualCircuitState } from '../State';
 import { RestoreResults } from '../../web/Server';
+import { NixieHeaterBase } from 'controller/nixie/heaters/Heater';
 
 
 export class byteValueMap extends Map<number, any> {
@@ -117,404 +118,454 @@ export class EquipmentIds {
   public invalidIds: InvalidEquipmentIdArray = new InvalidEquipmentIdArray([]);
 }
 export class byteValueMaps {
-  constructor() {
-    this.pumpStatus.transform = function (byte) {
-      // if (byte === 0) return this.get(0);
-      if (byte === 0) return extend(true, {}, this.get(0), { val: byte });
-      for (let b = 16; b > 0; b--) {
-        let bit = (1 << (b - 1));
-        if ((byte & bit) > 0) {
-          let v = this.get(b);
-          if (typeof v !== 'undefined') {
-            return extend(true, {}, v, { val: byte });
-          }
+    constructor() {
+        this.pumpStatus.transform = function (byte) {
+            // if (byte === 0) return this.get(0);
+            if (byte === 0) return extend(true, {}, this.get(0), { val: byte });
+            for (let b = 16; b > 0; b--) {
+                let bit = (1 << (b - 1));
+                if ((byte & bit) > 0) {
+                    let v = this.get(b);
+                    if (typeof v !== 'undefined') {
+                        return extend(true, {}, v, { val: byte });
+                    }
+                }
+            }
+            return { val: byte, name: 'error' + byte, desc: 'Unspecified Error ' + byte };
+        };
+        this.chlorinatorStatus.transform = function (byte) {
+            if (byte === 128) return { val: 128, name: 'commlost', desc: 'Communication Lost' };
+            else if (byte === 0) return { val: 0, name: 'ok', desc: 'Ok' };
+            for (let b = 8; b > 0; b--) {
+                let bit = (1 << (b - 1));
+                if ((byte & bit) > 0) {
+                    let v = this.get(b);
+                    if (typeof v !== "undefined") {
+                        return extend(true, {}, v, { val: byte & 0x00FF });
+                    }
+                }
+            }
+            return { val: byte, name: 'unknown' + byte, desc: 'Unknown status ' + byte };
+        };
+        this.scheduleTypes.transform = function (byte) {
+            return (byte & 128) > 0 ? extend(true, { val: 128 }, this.get(128)) : extend(true, { val: 0 }, this.get(0));
+        };
+        this.scheduleDays.transform = function (byte) {
+            let days = [];
+            let b = byte & 0x007F;
+            for (let bit = 7; bit >= 0; bit--) {
+                if ((byte & (1 << (bit - 1))) > 0) days.push(extend(true, {}, this.get(bit)));
+            }
+            return { val: b, days: days };
+        };
+        this.scheduleDays.toArray = function () {
+            let arrKeys = Array.from(this.keys());
+            let arr = [];
+            for (let i = 0; i < arrKeys.length; i++) arr.push(extend(true, { val: arrKeys[i] }, this.get(arrKeys[i])));
+            return arr;
+        };
+        this.virtualCircuits.transform = function (byte) {
+            return extend(true, {}, { val: byte, name: 'Unknown ' + byte }, this.get(byte), { val: byte });
+        };
+        this.tempUnits.transform = function (byte) { return extend(true, {}, { val: byte & 0x04 }, this.get(byte & 0x04)); };
+        this.panelModes.transform = function (byte) { return extend(true, { val: byte & 0x83 }, this.get(byte & 0x83)); };
+        this.controllerStatus.transform = function (byte: number, percent?: number) {
+            let v = extend(true, {}, this.get(byte) || this.get(0));
+            if (typeof percent !== 'undefined') v.percent = percent;
+            return v;
+        };
+        this.lightThemes.transform = function (byte) { return typeof byte === 'undefined' ? this.get(255) : extend(true, { val: byte }, this.get(byte) || this.get(255)); };
+        this.timeZones.findItem = function (val: string | number | { val: any, name: string }) {
+            if (typeof val === null || typeof val === 'undefined') return;
+            else if (typeof val === 'number') {
+                if (val <= 12) {  // We are looking for timezones based upon the utcOffset.
+                    let arr = this.toArray();
+                    let tz = arr.find(elem => elem.utcOffset === val);
+                    return typeof tz !== 'undefined' ? this.transform(tz.val) : undefined;
+                }
+                return this.transform(val);
+            }
+            else if (typeof val === 'string') {
+                let v = parseInt(val, 10);
+                if (!isNaN(v)) {
+                    if (v <= 12) {
+                        let arr = this.toArray();
+                        let tz = arr.find(elem => elem.utcOffset === val);
+                        return typeof tz !== 'undefined' ? this.transform(tz.val) : undefined;
+                    }
+                    return this.transform(v);
+                }
+                else {
+                    let arr = this.toArray();
+                    let tz = arr.find(elem => elem.abbrev === val || elem.name === val);
+                    return typeof tz !== 'undefined' ? this.transform(tz.val) : undefined;
+                }
+            }
+            else if (typeof val === 'object') {
+                if (typeof val.val !== 'undefined') return this.transform(parseInt(val.val, 10));
+                else if (typeof val.name !== 'undefined') return this.transformByName(val.name);
+            }
         }
-      }
-      return { val: byte, name: 'error' + byte, desc: 'Unspecified Error ' + byte };
-    };
-    this.chlorinatorStatus.transform = function (byte) {
-      if (byte === 128) return { val: 128, name: 'commlost', desc: 'Communication Lost' };
-      else if (byte === 0) return { val: 0, name: 'ok', desc: 'Ok' };
-      for (let b = 8; b > 0; b--) {
-        let bit = (1 << (b - 1));
-        if ((byte & bit) > 0) {
-          let v = this.get(b);
-          if (typeof v !== "undefined") {
-            return extend(true, {}, v, { val: byte & 0x00FF });
-          }
-        }
-      }
-      return { val: byte, name: 'unknown' + byte, desc: 'Unknown status ' + byte };
-    };
-    this.scheduleTypes.transform = function (byte) {
-      return (byte & 128) > 0 ? extend(true, { val: 128 }, this.get(128)) : extend(true, { val: 0 }, this.get(0));
-    };
-    this.scheduleDays.transform = function (byte) {
-      let days = [];
-      let b = byte & 0x007F;
-      for (let bit = 7; bit >= 0; bit--) {
-        if ((byte & (1 << (bit - 1))) > 0) days.push(extend(true, {}, this.get(bit)));
-      }
-      return { val: b, days: days };
-    };
-    this.scheduleDays.toArray = function () {
-      let arrKeys = Array.from(this.keys());
-      let arr = [];
-      for (let i = 0; i < arrKeys.length; i++) arr.push(extend(true, { val: arrKeys[i] }, this.get(arrKeys[i])));
-      return arr;
-    };
-    this.virtualCircuits.transform = function (byte) {
-      return extend(true, {}, { val: byte, name: 'Unknown ' + byte }, this.get(byte), { val: byte });
-    };
-    this.tempUnits.transform = function (byte) { return extend(true, {}, { val: byte & 0x04 }, this.get(byte & 0x04)); };
-    this.panelModes.transform = function (byte) { return extend(true, { val: byte & 0x83 }, this.get(byte & 0x83)); };
-    this.controllerStatus.transform = function (byte: number, percent?: number) {
-      let v = extend(true, {}, this.get(byte) || this.get(0));
-      if (typeof percent !== 'undefined') v.percent = percent;
-      return v;
-    };
-    this.lightThemes.transform = function (byte) { return typeof byte === 'undefined' ? this.get(255) : extend(true, { val: byte }, this.get(byte) || this.get(255)); };
-    this.timeZones.findItem = function (val: string | number | { val: any, name: string }) {
-      if (typeof val === null || typeof val === 'undefined') return;
-      else if (typeof val === 'number') {
-        if (val <= 12) {  // We are looking for timezones based upon the utcOffset.
-          let arr = this.toArray();
-          let tz = arr.find(elem => elem.utcOffset === val);
-          return typeof tz !== 'undefined' ? this.transform(tz.val) : undefined;
-        }
-        return this.transform(val);
-      }
-      else if (typeof val === 'string') {
-        let v = parseInt(val, 10);
-        if (!isNaN(v)) {
-          if (v <= 12) {
-            let arr = this.toArray();
-            let tz = arr.find(elem => elem.utcOffset === val);
-            return typeof tz !== 'undefined' ? this.transform(tz.val) : undefined;
-          }
-          return this.transform(v);
-        }
-        else {
-          let arr = this.toArray();
-          let tz = arr.find(elem => elem.abbrev === val || elem.name === val);
-          return typeof tz !== 'undefined' ? this.transform(tz.val) : undefined;
-        }
-      }
-      else if (typeof val === 'object') {
-        if (typeof val.val !== 'undefined') return this.transform(parseInt(val.val, 10));
-        else if (typeof val.name !== 'undefined') return this.transformByName(val.name);
-      }
     }
-  }
-  public expansionBoards: byteValueMap = new byteValueMap();
-  // Identifies which controller manages the underlying equipment.
-  public equipmentMaster: byteValueMap = new byteValueMap([
-    [0, { val: 0, name: 'ocp', desc: 'Outdoor Control Panel' }],
-    [1, { val: 1, name: 'ncp', desc: 'Nixie Control Panel' }]
-  ]);
-  public equipmentCommStatus: byteValueMap = new byteValueMap([
-    [0, { val: 0, name: 'ready', desc: 'Ready' }],
-    [1, { val: 1, name: 'commerr', desc: 'Communication Error' }]
-  ]);
-  public panelModes: byteValueMap = new byteValueMap([
-    [0, { val: 0, name: 'auto', desc: 'Auto' }],
-    // [1, { val: 1, name: 'service', desc: 'Service' }],
-    // [8, { val: 8, name: 'freeze', desc: 'Freeze' }],
-    // [128, { val: 128, name: 'timeout', desc: 'Timeout' }],
-    // [129, { val: 129, name: 'service-timeout', desc: 'Service/Timeout' }],
-    [255, { name: 'error', desc: 'System Error' }]
-  ]);
-  public controllerStatus: byteValueMap = new byteValueMap([
-    [0, { val: 0, name: 'initializing', desc: 'Initializing', percent: 0 }],
-    [1, { val: 1, name: 'ready', desc: 'Ready', percent: 100 }],
-    [2, { val: 2, name: 'loading', desc: 'Loading', percent: 0 }],
-    [3, { val: 255, name: 'Error', desc: 'Error', percent: 0 }]
-  ]);
+    public expansionBoards: byteValueMap = new byteValueMap();
+    // Identifies which controller manages the underlying equipment.
+    public equipmentMaster: byteValueMap = new byteValueMap([
+        [0, { val: 0, name: 'ocp', desc: 'Outdoor Control Panel' }],
+        [1, { val: 1, name: 'ncp', desc: 'Nixie Control Panel' }]
+    ]);
+    public equipmentCommStatus: byteValueMap = new byteValueMap([
+        [0, { val: 0, name: 'ready', desc: 'Ready' }],
+        [1, { val: 1, name: 'commerr', desc: 'Communication Error' }]
+    ]);
+    public panelModes: byteValueMap = new byteValueMap([
+        [0, { val: 0, name: 'auto', desc: 'Auto' }],
+        // [1, { val: 1, name: 'service', desc: 'Service' }],
+        // [8, { val: 8, name: 'freeze', desc: 'Freeze' }],
+        // [128, { val: 128, name: 'timeout', desc: 'Timeout' }],
+        // [129, { val: 129, name: 'service-timeout', desc: 'Service/Timeout' }],
+        [255, { name: 'error', desc: 'System Error' }]
+    ]);
+    public controllerStatus: byteValueMap = new byteValueMap([
+        [0, { val: 0, name: 'initializing', desc: 'Initializing', percent: 0 }],
+        [1, { val: 1, name: 'ready', desc: 'Ready', percent: 100 }],
+        [2, { val: 2, name: 'loading', desc: 'Loading', percent: 0 }],
+        [3, { val: 255, name: 'Error', desc: 'Error', percent: 0 }]
+    ]);
 
-  public circuitFunctions: byteValueMap = new byteValueMap([
-    [0, { name: 'generic', desc: 'Generic' }],
-    [1, { name: 'spa', desc: 'Spa', hasHeatSource: true }],
-    [2, { name: 'pool', desc: 'Pool', hasHeatSource: true }],
-    [5, { name: 'mastercleaner', desc: 'Master Cleaner' }],
-    [7, { name: 'light', desc: 'Light', isLight: true }],
-    [9, { name: 'samlight', desc: 'SAM Light', isLight: true }],
-    [10, { name: 'sallight', desc: 'SAL Light', isLight: true }],
-    [11, { name: 'photongen', desc: 'Photon Gen', isLight: true }],
-    [12, { name: 'colorwheel', desc: 'Color Wheel', isLight: true }],
-    [13, { name: 'valve', desc: 'Valve' }],
-    [14, { name: 'spillway', desc: 'Spillway' }],
-    [15, { name: 'floorcleaner', desc: 'Floor Cleaner' }],
-    [16, { name: 'intellibrite', desc: 'Intellibrite', isLight: true }],
-    [17, { name: 'magicstream', desc: 'Magicstream', isLight: true }],
-    [19, { name: 'notused', desc: 'Not Used' }],
-    [65, { name: 'lotemp', desc: 'Lo-Temp' }],
-    [66, { name: 'hightemp', desc: 'Hi-Temp' }]
-  ]);
+    public circuitFunctions: byteValueMap = new byteValueMap([
+        [0, { name: 'generic', desc: 'Generic' }],
+        [1, { name: 'spa', desc: 'Spa', hasHeatSource: true, body: 2 }],
+        [2, { name: 'pool', desc: 'Pool', hasHeatSource: true, body: 1 }],
+        [5, { name: 'mastercleaner', desc: 'Master Cleaner', body: 1 }],
+        [7, { name: 'light', desc: 'Light', isLight: true }],
+        [9, { name: 'samlight', desc: 'SAM Light', isLight: true }],
+        [10, { name: 'sallight', desc: 'SAL Light', isLight: true }],
+        [11, { name: 'photongen', desc: 'Photon Gen', isLight: true }],
+        [12, { name: 'colorwheel', desc: 'Color Wheel', isLight: true }],
+        [13, { name: 'valve', desc: 'Valve' }],
+        [14, { name: 'spillway', desc: 'Spillway' }],
+        [15, { name: 'floorcleaner', desc: 'Floor Cleaner', body: 1 }],  // This circuit function does not seem to exist in IntelliTouch.
+        [16, { name: 'intellibrite', desc: 'Intellibrite', isLight: true, theme: 'intellibrite' }],
+        [17, { name: 'magicstream', desc: 'Magicstream', isLight: true, theme: 'magicstream' }],
+        [19, { name: 'notused', desc: 'Not Used' }],
+        [65, { name: 'lotemp', desc: 'Lo-Temp' }],
+        [66, { name: 'hightemp', desc: 'Hi-Temp' }]
+    ]);
 
-  // Feature functions are used as the available options to define a circuit.
-  public featureFunctions: byteValueMap = new byteValueMap([[0, { name: 'generic', desc: 'Generic' }], [1, { name: 'spillway', desc: 'Spillway' }]]);
-  public virtualCircuits: byteValueMap = new byteValueMap([
-    [128, { name: 'solar', desc: 'Solar', assignableToPumpCircuit: true }],
-    [129, { name: 'heater', desc: 'Either Heater', assignableToPumpCircuit: true }],
-    [130, { name: 'poolHeater', desc: 'Pool Heater', assignableToPumpCircuit: true }],
-    [131, { name: 'spaHeater', desc: 'Spa Heater', assignableToPumpCircuit: true }],
-    [132, { name: 'freeze', desc: 'Freeze', assignableToPumpCircuit: true }],
-    [133, { name: 'heatBoost', desc: 'Heat Boost', assignableToPumpCircuit: false }],
-    [134, { name: 'heatEnable', desc: 'Heat Enable', assignableToPumpCircuit: false }],
-    [135, { name: 'pumpSpeedUp', desc: 'Pump Speed +', assignableToPumpCircuit: false }],
-    [136, { name: 'pumpSpeedDown', desc: 'Pump Speed -', assignableToPumpCircuit: false }],
-    [255, { name: 'notused', desc: 'NOT USED', assignableToPumpCircuit: true }]
-  ]);
-  public lightThemes: byteValueMap = new byteValueMap([
-    [0, { name: 'off', desc: 'Off', type: 'intellibrite' }],
-    [1, { name: 'on', desc: 'On', type: 'intellibrite' }],
-    [128, { name: 'colorsync', desc: 'Color Sync', type: 'intellibrite' }],
-    [144, { name: 'colorswim', desc: 'Color Swim', type: 'intellibrite' }],
-    [160, { name: 'colorset', desc: 'Color Set', type: 'intellibrite' }],
-    [177, { name: 'party', desc: 'Party', type: 'intellibrite', sequence: 2 }],
-    [178, { name: 'romance', desc: 'Romance', type: 'intellibrite', sequence: 3 }],
-    [179, { name: 'caribbean', desc: 'Caribbean', type: 'intellibrite', sequence: 4 }],
-    [180, { name: 'american', desc: 'American', type: 'intellibrite', sequence: 5 }],
-    [181, { name: 'sunset', desc: 'Sunset', type: 'intellibrite', sequence: 6 }],
-    [182, { name: 'royal', desc: 'Royal', type: 'intellibrite', sequence: 7 }],
-    [190, { name: 'save', desc: 'Save', type: 'intellibrite', sequence: 13 }],
-    [191, { name: 'recall', desc: 'Recall', type: 'intellibrite', sequence: 14 }],
-    [193, { name: 'blue', desc: 'Blue', type: 'intellibrite', sequence: 8 }],
-    [194, { name: 'green', desc: 'Green', type: 'intellibrite', sequence: 9 }],
-    [195, { name: 'red', desc: 'Red', type: 'intellibrite', sequence: 10 }],
-    [196, { name: 'white', desc: 'White', type: 'intellibrite', sequence: 11 }],
-    [197, { name: 'magenta', desc: 'Magenta', type: 'intellibrite', sequence: 12 }],
-    [208, { name: 'thumper', desc: 'Thumper', type: 'magicstream' }],
-    [209, { name: 'hold', desc: 'Hold', type: 'magicstream' }],
-    [210, { name: 'reset', desc: 'Reset', type: 'magicstream' }],
-    [211, { name: 'mode', desc: 'Mode', type: 'magicstream' }],
-    [254, { name: 'unknown', desc: 'unknown' }],
-    [255, { name: 'none', desc: 'None' }]
-  ]);
-  public colorLogicThemes = new byteValueMap([
-    [0, { name: 'cloudwhite', desc: 'Cloud White', type: 'colorlogic', sequence: 7 }],
-    [1, { name: 'deepsea', desc: 'Deep Sea', type: 'colorlogic', sequence: 2 }],
-    [2, { name: 'royalblue', desc: 'Royal Blue', type: 'colorlogic', sequence: 3 }],
-    [3, { name: 'afernoonskies', desc: 'Afternoon Skies', type: 'colorlogic', sequence: 4 }],
-    [4, { name: 'aquagreen', desc: 'Aqua Green', type: 'colorlogic', sequence: 5 }],
-    [5, { name: 'emerald', desc: 'Emerald', type: 'colorlogic', sequence: 6 }],
-    [6, { name: 'warmred', desc: 'Warm Red', type: 'colorlogic', sequence: 8 }],
-    [7, { name: 'flamingo', desc: 'Flamingo', type: 'colorlogic', sequence: 9 }],
-    [8, { name: 'vividviolet', desc: 'Vivid Violet', type: 'colorlogic', sequence: 10 }],
-    [9, { name: 'sangria', desc: 'Sangria', type: 'colorlogic', sequence: 11 }],
-    [10, { name: 'twilight', desc: 'Twilight', type: 'colorlogic', sequence: 12 }],
-    [11, { name: 'tranquility', desc: 'Tranquility', type: 'colorlogic', sequence: 13 }],
-    [12, { name: 'gemstone', desc: 'Gemstone', type: 'colorlogic', sequence: 14 }],
-    [13, { name: 'usa', desc: 'USA', type: 'colorlogic', sequence: 15 }],
-    [14, { name: 'mardigras', desc: 'Mardi Gras', type: 'colorlogic', sequence: 16 }],
-    [15, { name: 'cabaret', desc: 'Cabaret', type: 'colorlogic', sequence: 17 }],
-    [255, { name: 'none', desc: 'None' }]
-  ]);
-
-  public lightColors: byteValueMap = new byteValueMap([
-    [0, { name: 'white', desc: 'White' }],
-    [2, { name: 'lightgreen', desc: 'Light Green' }],
-    [4, { name: 'green', desc: 'Green' }],
-    [6, { name: 'cyan', desc: 'Cyan' }],
-    [8, { name: 'blue', desc: 'Blue' }],
-    [10, { name: 'lavender', desc: 'Lavender' }],
-    [12, { name: 'magenta', desc: 'Magenta' }],
-    [14, { name: 'lightmagenta', desc: 'Light Magenta' }]
-  ]);
-  public scheduleDays: byteValueMap = new byteValueMap([
-    [1, { name: 'sat', desc: 'Saturday', dow: 6 }],
-    [2, { name: 'fri', desc: 'Friday', dow: 5 }],
-    [3, { name: 'thu', desc: 'Thursday', dow: 4 }],
-    [4, { name: 'wed', desc: 'Wednesday', dow: 3 }],
-    [5, { name: 'tue', desc: 'Tuesday', dow: 2 }],
-    [6, { name: 'mon', desc: 'Monday', dow: 1 }],
-    [7, { name: 'sun', desc: 'Sunday', dow: 0 }]
-  ]);
-  public scheduleTimeTypes: byteValueMap = new byteValueMap([
-    [0, { name: 'manual', desc: 'Manual' }]
-  ]);
-  public scheduleDisplayTypes: byteValueMap = new byteValueMap([
-    [0, { name: 'always', desc: 'Always' }],
-    [1, { name: 'active', desc: 'When Active' }],
-    [2, { name: 'never', desc: 'Never' }]
-  ]);
-
-  public pumpTypes: byteValueMap = new byteValueMap([
-    [1, { name: 'vf', desc: 'Intelliflo VF', minFlow: 15, maxFlow: 130, flowStepSize: 1, maxCircuits: 8, hasAddress: true }],
-    [64, { name: 'vsf', desc: 'Intelliflo VSF', minSpeed: 450, maxSpeed: 3450, speedStepSize: 10, minFlow: 15, maxFlow: 130, flowStepSize: 1, maxCircuits: 8, hasAddress: true }],
-    [65, { name: 'ds', desc: 'Two-Speed', maxCircuits: 40, hasAddress: false, hasBody: true }],
-    [128, { name: 'vs', desc: 'Intelliflo VS', maxPrimingTime: 6, minSpeed: 450, maxSpeed: 3450, speedStepSize: 10, maxCircuits: 8, hasAddress: true }],
-    [169, { name: 'vssvrs', desc: 'IntelliFlo VS+SVRS', maxPrimingTime: 6, minSpeed: 450, maxSpeed: 3450, speedStepSize: 10, maxCircuits: 8, hasAddress: true }]
-  ]);
-  public pumpSSModels: byteValueMap = new byteValueMap([
-    [0, { name: 'unspecified', desc: 'Unspecified', amps: 0, pf: 0, volts: 0, watts: 0 }],
-    [1, { name: 'wf1hpE', desc: '1hp WhisperFlo E+', amps: 7.4, pf: .9, volts: 230, watts: 1532 }],
-    [2, { name: 'wf1hpMax', desc: '1hp WhisperFlo Max', amps: 9, pf: .87, volts: 230, watts: 1600 }],
-    [3, { name: 'generic15hp', desc: '1.5hp Pump', amps: 9.3, pf: .9, volts: 230, watts: 1925 }],
-    [4, { name: 'generic2hp', desc: '2hp Pump', amps: 12, pf: .9, volts: 230, watts: 2484 }],
-    [5, { name: 'generic25hp', desc: '2.5hp Pump', amps: 12.5, pf: .9, volts: 230, watts: 2587 }],
-    [6, { name: 'generic3hp', desc: '3hp Pump', amps: 13.5, pf: .9, volts: 230, watts: 2794 }]
-  ]);
-  public pumpDSModels: byteValueMap = new byteValueMap([
-    [0, { name: 'unspecified', desc: 'Unspecified', loAmps: 0, hiAmps: 0, pf: 0, volts: 0, loWatts: 0, hiWatts: 0 }],
-    [1, { name: 'generic1hp', desc: '1hp Pump', loAmps: 2.4, hiAmps: 6.5, pf: .9, volts: 230, loWatts: 497, hiWatts: 1345 }],
-    [2, { name: 'generic15hp', desc: '1.5hp Pump', loAmps: 2.7, hiAmps: 9.3, pf: .9, volts: 230, loWatts: 558, hiWatts: 1925 }],
-    [3, { name: 'generic2hp', desc: '2hp Pump', loAmps: 2.9, hiAmps: 12, pf: .9, volts: 230, loWatts: 600, hiWatts: 2484 }],
-    [4, { name: 'generic25hp', desc: '2.5hp Pump', loAmps: 3.1, hiAmps: 12.5, pf: .9, volts: 230, loWatts: 642, hiWatts: 2587 }],
-    [5, { name: 'generic3hp', desc: '3hp Pump', loAmps: 3.3, hiAmps: 13.5, pf: .9, volts: 230, loWatts: 683, hiWatts: 2794 }]
-  ]);
-  public pumpVSModels: byteValueMap = new byteValueMap([
-    [0, { name: 'intelliflovs', desc: 'IntelliFlo VS' }]
-  ]);
-  public pumpVFModels: byteValueMap = new byteValueMap([
-    [0, { name: 'intelliflovf', desc: 'IntelliFlo VF' }]
-  ]);
-  public pumpVSFModels: byteValueMap = new byteValueMap([
-    [0, { name: 'intelliflovsf', desc: 'IntelliFlo VSF' }]
-  ]);
-  public pumpVSSVRSModels: byteValueMap = new byteValueMap([
-    [0, { name: 'intelliflovssvrs', desc: 'IntelliFlo VS+SVRS' }]
-  ]);
-  // These are used for single-speed pump definitions.  Essentially the way this works is that when
-  // the body circuit is running the single speed pump is on.
-  public pumpBodies: byteValueMap = new byteValueMap([
-    [0, { name: 'pool', desc: 'Pool' }],
-    [101, { name: 'spa', desc: 'Spa' }],
-    [255, { name: 'poolspa', desc: 'Pool/Spa' }]
-  ]);
-  public heaterTypes: byteValueMap = new byteValueMap([
-    [1, { name: 'gas', desc: 'Gas Heater', hasAddress: false }],
-    [2, { name: 'solar', desc: 'Solar Heater', hasAddress: false, hasCoolSetpoint: true }],
-    [3, { name: 'heatpump', desc: 'Heat Pump', hasAddress: true }],
-    [4, { name: 'ultratemp', desc: 'UltraTemp', hasAddress: true, hasCoolSetpoint: true }],
-    [5, { name: 'hybrid', desc: 'Hybrid', hasAddress: true }],
-    [6, { name: 'maxetherm', desc: 'Max-E-Therm', hasAddress: true }],
-    [7, { name: 'mastertemp', desc: 'MasterTemp', hasAddress: true }]
-  ]);
-  public heatModes: byteValueMap = new byteValueMap([
-    [0, { name: 'off', desc: 'Off' }],
-    [3, { name: 'heater', desc: 'Heater' }],
-    [5, { name: 'solar', desc: 'Solar Only' }],
-    [12, { name: 'solarpref', desc: 'Solar Preferred' }]
-  ]);
-  public heatSources: byteValueMap = new byteValueMap([
-    [0, { name: 'off', desc: 'No Heater' }],
-    [3, { name: 'heater', desc: 'Heater' }],
-    [5, { name: 'solar', desc: 'Solar Only' }],
-    [21, { name: 'solarpref', desc: 'Solar Preferred' }],
-    [32, { name: 'nochange', desc: 'No Change' }]
-  ]);
-  public heatStatus: byteValueMap = new byteValueMap([
-    [0, { name: 'off', desc: 'Off' }],
-    [1, { name: 'heater', desc: 'Heater' }],
-    [2, { name: 'solar', desc: 'Solar' }],
-    [3, { name: 'cooling', desc: 'Cooling' }]
-  ]);
-  public pumpStatus: byteValueMap = new byteValueMap([
-    [0, { name: 'off', desc: 'Off' }], // When the pump is disconnected or has no power then we simply report off as the status.  This is not the recommended wiring
-    // for a VS/VF pump as is should be powered at all times.  When it is, the status will always report a value > 0.
-    [1, { name: 'ok', desc: 'Ok' }], // Status is always reported when the pump is not wired to a relay regardless of whether it is on or not
-    // as is should be if this is a VS / VF pump.  However if it is wired to a relay most often filter, the pump will report status
-    // 0 if it is not running.  Essentially this is no error but it is not a status either.
-    [2, { name: 'filter', desc: 'Filter warning' }],
-    [3, { name: 'overcurrent', desc: 'Overcurrent condition' }],
-    [4, { name: 'priming', desc: 'Priming' }],
-    [5, { name: 'blocked', desc: 'System blocked' }],
-    [6, { name: 'general', desc: 'General alarm' }],
-    [7, { name: 'overtemp', desc: 'Overtemp condition' }],
-    [8, { name: 'power', dec: 'Power outage' }],
-    [9, { name: 'overcurrent2', desc: 'Overcurrent condition 2' }],
-    [10, { name: 'overvoltage', desc: 'Overvoltage condition' }],
-    [11, { name: 'error11', desc: 'Unspecified Error 11' }],
-    [12, { name: 'error12', desc: 'Unspecified Error 12' }],
-    [13, { name: 'error13', desc: 'Unspecified Error 13' }],
-    [14, { name: 'error14', desc: 'Unspecified Error 14' }],
-    [15, { name: 'error15', desc: 'Unspecified Error 15' }],
-    [16, { name: 'commfailure', desc: 'Communication failure' }]
-  ]);
-  public pumpUnits: byteValueMap = new byteValueMap([
-    [0, { name: 'rpm', desc: 'RPM' }],
-    [1, { name: 'gpm', desc: 'GPM' }]
-  ]);
-  public bodyTypes: byteValueMap = new byteValueMap([
-    [0, { name: 'pool', desc: 'Pool' }],
-    [1, { name: 'spa', desc: 'Spa' }],
-    [2, { name: 'spa', desc: 'Spa' }],
-    [3, { name: 'spa', desc: 'Spa' }]
-  ]);
-  public bodies: byteValueMap = new byteValueMap([
-    [0, { name: 'pool', desc: 'Pool' }],
-    [1, { name: 'spa', desc: 'Spa' }],
-    [2, { name: 'body3', desc: 'Body 3' }],
-    [3, { name: 'body4', desc: 'Body 4' }],
-    [32, { name: 'poolspa', desc: 'Pool/Spa' }]
-  ]);
-  public chlorinatorStatus: byteValueMap = new byteValueMap([
-    [0, { name: 'ok', desc: 'Ok' }],
-    [1, { name: 'lowflow', desc: 'Low Flow' }],
-    [2, { name: 'lowsalt', desc: 'Low Salt' }],
-    [3, { name: 'verylowsalt', desc: 'Very Low Salt' }],
-    [4, { name: 'highcurrent', desc: 'High Current' }],
-    [5, { name: 'clean', desc: 'Clean Cell' }],
-    [6, { name: 'lowvoltage', desc: 'Low Voltage' }],
-    [7, { name: 'lowtemp', desc: 'Water Temp Low' }],
-    [8, { name: 'commlost', desc: 'Communication Lost' }]
-  ]);
-  public chlorinatorType: byteValueMap = new byteValueMap([
-    [0, { name: 'pentair', desc: 'Pentair' }],
-    [1, { name: 'unknown', desc: 'unknown' }],
-    [2, { name: 'aquarite', desc: 'Aquarite' }],
-    [3, { name: 'unknown', desc: 'unknown' }]
-  ]);
-  public chlorinatorModel: byteValueMap = new byteValueMap([
-    [0, { name: 'unknown', desc: 'unknown', capacity: 0, chlorinePerDay: 0, chlorinePerSec: 0 }],
-    [1, { name: 'intellichlor--15', desc: 'IntelliChlor IC15', capacity: 15000, chlorinePerDay: 0.60, chlorinePerSec: 0.60 / 86400 }],
-    [2, { name: 'intellichlor--20', desc: 'IntelliChlor IC20', capacity: 20000, chlorinePerDay: 0.70, chlorinePerSec: 0.70 / 86400 }],
-    [3, { name: 'intellichlor--40', desc: 'IntelliChlor IC40', capacity: 40000, chlorinePerDay: 1.40, chlorinePerSec: 1.4 / 86400 }],
-    [4, { name: 'intellichlor--60', desc: 'IntelliChlor IC60', capacity: 60000, chlorinePerDay: 2, chlorinePerSec: 2 / 86400 }],
-    [5, { name: 'aquarite-t15', desc: 'AquaRite T15', capacity: 40000, chlorinePerDay: 1.47, chlorinePerSec: 1.47 / 86400 }],
-    [6, { name: 'aquarite-t9', desc: 'AquaRite T9', capacity: 30000, chlorinePerDay: 0.98, chlorinePerSec: 0.98 / 86400 }],
-    [7, { name: 'aquarite-t5', desc: 'AquaRite T5', capacity: 20000, chlorinePerDay: 0.735, chlorinePerSec: 0.735 / 86400 }],
-    [8, { name: 'aquarite-t3', desc: 'AquaRite T3', capacity: 15000, chlorinePerDay: 0.53, chlorinePerSec: 0.53 / 86400 }],
-    [9, { name: 'aquarite-925', desc: 'AquaRite 925', capacity: 25000, chlorinePerDay: 0.98, chlorinePerSec: 0.98 / 86400 }],
-    [10, { name: 'aquarite-940', desc: 'AquaRite 940', capacity: 40000, chlorinePerDay: 1.47, chlorinePerSec: 1.47 / 86400 }]
-  ])
-  public customNames: byteValueMap = new byteValueMap();
-  public circuitNames: byteValueMap = new byteValueMap();
-  public scheduleTypes: byteValueMap = new byteValueMap([
-    [0, { name: 'runonce', desc: 'Run Once', startDate: true, startTime: true, endTime: true, days: false, heatSource: true, heatSetpoint: true }],
-    [128, { name: 'repeat', desc: 'Repeats', startDate: false, startTime: true, endTime: true, days: 'multi', heatSource: true, heatSetpoint: true }]
-  ]);
-  public circuitGroupTypes: byteValueMap = new byteValueMap([
-    [0, { name: 'none', desc: 'Unspecified' }],
-    [1, { name: 'light', desc: 'Light' }],
-    [2, { name: 'circuit', desc: 'Circuit' }],
-    [3, { name: 'intellibrite', desc: 'IntelliBrite' }]
-  ]);
-  public groupCircuitStates: byteValueMap = new byteValueMap([
-    [0, { name: 'off', desc: 'Off' }],
-    [1, { name: 'on', desc: 'On' }]
-  ]);
-  public systemUnits: byteValueMap = new byteValueMap([
-    [0, { name: 'english', desc: 'English' }],
-    [4, { name: 'metric', desc: 'Metric' }]
-  ]);
-  public tempUnits: byteValueMap = new byteValueMap([
-    [0, { name: 'F', desc: 'Fahrenheit' }],
-    [4, { name: 'C', desc: 'Celsius' }]
-  ]);
-  public valveTypes: byteValueMap = new byteValueMap([
-    [0, { name: 'standard', desc: 'Standard' }],
-    [1, { name: 'intellivalve', desc: 'IntelliValve' }]
-  ]);
-  public intellibriteActions: byteValueMap = new byteValueMap([
-    [0, { name: 'ready', desc: 'Ready' }],
-    [1, { name: 'sync', desc: 'Synchronizing' }],
-    [2, { name: 'set', desc: 'Sequencing Set Operation' }],
-    [3, { name: 'swim', desc: 'Sequencing Swim Operation' }],
-    [4, { name: 'color', desc: 'Sequencing Theme/Color Operation' }],
-    [5, { name: 'other', desc: 'Sequencing Save/Recall Operation' }]
-  ]);
+    // Feature functions are used as the available options to define a circuit.
+    public featureFunctions: byteValueMap = new byteValueMap([[0, { name: 'generic', desc: 'Generic' }], [1, { name: 'spillway', desc: 'Spillway' }]]);
+    public virtualCircuits: byteValueMap = new byteValueMap([
+        [128, { name: 'solar', desc: 'Solar', assignableToPumpCircuit: true }],
+        [129, { name: 'heater', desc: 'Either Heater', assignableToPumpCircuit: true }],
+        [130, { name: 'poolHeater', desc: 'Pool Heater', assignableToPumpCircuit: true }],
+        [131, { name: 'spaHeater', desc: 'Spa Heater', assignableToPumpCircuit: true }],
+        [132, { name: 'freeze', desc: 'Freeze', assignableToPumpCircuit: true }],
+        [133, { name: 'heatBoost', desc: 'Heat Boost', assignableToPumpCircuit: false }],
+        [134, { name: 'heatEnable', desc: 'Heat Enable', assignableToPumpCircuit: false }],
+        [135, { name: 'pumpSpeedUp', desc: 'Pump Speed +', assignableToPumpCircuit: false }],
+        [136, { name: 'pumpSpeedDown', desc: 'Pump Speed -', assignableToPumpCircuit: false }],
+        [255, { name: 'notused', desc: 'NOT USED', assignableToPumpCircuit: true }]
+    ]);
+    public lightThemes: byteValueMap = new byteValueMap([
+        [0, { name: 'off', desc: 'Off' }],
+        [1, { name: 'on', desc: 'On' }],
+        [128, { name: 'colorsync', desc: 'Color Sync' }],
+        [144, { name: 'colorswim', desc: 'Color Swim' }],
+        [160, { name: 'colorset', desc: 'Color Set' }],
+        [177, { name: 'party', desc: 'Party', types: ['intellibrite'], sequence: 2 }],
+        [178, { name: 'romance', desc: 'Romance', types: ['intellibrite'], sequence: 3 }],
+        [179, { name: 'caribbean', desc: 'Caribbean', types: ['intellibrite'], sequence: 4 }],
+        [180, { name: 'american', desc: 'American', types: ['intellibrite'], sequence: 5 }],
+        [181, { name: 'sunset', desc: 'Sunset', types: ['intellibrite'], sequence: 6 }],
+        [182, { name: 'royal', desc: 'Royal', types: ['intellibrite'], sequence: 7 }],
+        [190, { name: 'save', desc: 'Save', types: ['intellibrite'], sequence: 13 }],
+        [191, { name: 'recall', desc: 'Recall', types: ['intellibrite'], sequence: 14 }],
+        [193, { name: 'blue', desc: 'Blue', types: ['intellibrite'], sequence: 8 }],
+        [194, { name: 'green', desc: 'Green', types: ['intellibrite'], sequence: 9 }],
+        [195, { name: 'red', desc: 'Red', types: ['intellibrite'], sequence: 10 }],
+        [196, { name: 'white', desc: 'White', types: ['intellibrite'], sequence: 11 }],
+        [197, { name: 'magenta', desc: 'Magenta', types: ['intellibrite'], sequence: 12 }],
+        [208, { name: 'thumper', desc: 'Thumper', types: ['magicstream'] }],
+        [209, { name: 'hold', desc: 'Hold', types: ['magicstream'] }],
+        [210, { name: 'reset', desc: 'Reset', types: ['magicstream'] }],
+        [211, { name: 'mode', desc: 'Mode', types: ['magicstream'] }],
+        [254, { name: 'unknown', desc: 'unknown' }],
+        [255, { name: 'none', desc: 'None' }]
+    ]);
+    public colorLogicThemes = new byteValueMap([
+        [0, { name: 'cloudwhite', desc: 'Cloud White', types: ['colorlogic'], sequence: 7 }],
+        [1, { name: 'deepsea', desc: 'Deep Sea', types: ['colorlogic'], sequence: 2 }],
+        [2, { name: 'royalblue', desc: 'Royal Blue', types: ['colorlogic'], sequence: 3 }],
+        [3, { name: 'afernoonskies', desc: 'Afternoon Skies', types: ['colorlogic'], sequence: 4 }],
+        [4, { name: 'aquagreen', desc: 'Aqua Green', types: ['colorlogic'], sequence: 5 }],
+        [5, { name: 'emerald', desc: 'Emerald', types: ['colorlogic'], sequence: 6 }],
+        [6, { name: 'warmred', desc: 'Warm Red', types: ['colorlogic'], sequence: 8 }],
+        [7, { name: 'flamingo', desc: 'Flamingo', types: ['colorlogic'], sequence: 9 }],
+        [8, { name: 'vividviolet', desc: 'Vivid Violet', types: ['colorlogic'], sequence: 10 }],
+        [9, { name: 'sangria', desc: 'Sangria', types: ['colorlogic'], sequence: 11 }],
+        [10, { name: 'twilight', desc: 'Twilight', types: ['colorlogic'], sequence: 12 }],
+        [11, { name: 'tranquility', desc: 'Tranquility', types: ['colorlogic'], sequence: 13 }],
+        [12, { name: 'gemstone', desc: 'Gemstone', types: ['colorlogic'], sequence: 14 }],
+        [13, { name: 'usa', desc: 'USA', types: ['colorlogic'], sequence: 15 }],
+        [14, { name: 'mardigras', desc: 'Mardi Gras', types: ['colorlogic'], sequence: 16 }],
+        [15, { name: 'cabaret', desc: 'Cabaret', types: ['colorlogic'], sequence: 17 }],
+        [255, { name: 'none', desc: 'None' }]
+    ]);
+    public lightCommands = new byteValueMap([
+        [4, { name: 'colorhold', desc: 'Hold', types: ['intellibrite', 'magicstream'], command: 'colorHold', sequence: 13 }],
+        [5, { name: 'colorrecall', desc: 'Recall', types: ['intellibrite', 'magicstream'], command: 'colorRecall', sequence: 14 }],
+        [6, { name: 'lightthumper', desc: 'Thumper', types: ['magicstream'], command: 'lightThumper', message: 'Toggling Thumper',
+            sequence: [ // Cycle party mode 3 times.
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 100 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 5000 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 100 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 5000 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 100 },
+                { isOn: false, timeout: 100 }
+            ]
+        }]
+    ]);
+    public lightGroupCommands = new byteValueMap([
+        [1, { name: 'colorsync', desc: 'Sync', types: ['intellibrite'], command: 'colorSync', message:'Synchronizing' }],
+        [2, { name: 'colorset', desc: 'Set', types: ['intellibrite'], command: 'colorSet', message: 'Sequencing Set Operation' }],
+        [3, { name: 'colorswim', desc: 'Swim', types: ['intellibrite'], command: 'colorSwim', message:'Sequencing Swim Operation' }],
+        [4, { name: 'colorhold', desc: 'Hold', types: ['intellibrite', 'magicstream'], command: 'colorHold', message: 'Saving Current Colors', sequence: 13 }],
+        [5, { name: 'colorrecall', desc: 'Recall', types: ['intellibrite', 'magicstream'], command: 'colorRecall', message: 'Recalling Saved Colors', sequence: 14 }],
+        [6, { name: 'lightthumper', desc: 'Thumper', types: ['magicstream'], command: 'lightThumper', message: 'Toggling Thumper',
+            sequence: [ // Cycle party mode 3 times.
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 100 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 5000 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 100 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 5000 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 100 },
+                { isOn: false, timeout: 100 },
+                { isOn: true, timeout: 1000 },
+            ]
+        }]
+    ]);
+    public circuitActions: byteValueMap = new byteValueMap([
+        [0, { name: 'ready', desc: 'Ready' }],
+        [1, { name: 'colorsync', desc: 'Synchronizing' }],
+        [2, { name: 'colorset', desc: 'Sequencing Set Operation' }],
+        [3, { name: 'colorswim', desc: 'Sequencing Swim Operation' }],
+        [4, { name: 'lighttheme', desc: 'Sequencing Theme/Color Operation' }],
+        [5, { name: 'colorhold', desc: 'Saving Current Color' }],
+        [6, { name: 'colorrecall', desc: 'Recalling Saved Color' }],
+        [7, { name: 'lightthumper', desc: 'Setting Light Thumper' }]
+    ]);
+    public lightColors: byteValueMap = new byteValueMap([
+        [0, { name: 'white', desc: 'White' }],
+        [2, { name: 'lightgreen', desc: 'Light Green' }],
+        [4, { name: 'green', desc: 'Green' }],
+        [6, { name: 'cyan', desc: 'Cyan' }],
+        [8, { name: 'blue', desc: 'Blue' }],
+        [10, { name: 'lavender', desc: 'Lavender' }],
+        [12, { name: 'magenta', desc: 'Magenta' }],
+        [14, { name: 'lightmagenta', desc: 'Light Magenta' }]
+    ]);
+    public scheduleDays: byteValueMap = new byteValueMap([
+        [1, { name: 'sat', desc: 'Saturday', dow: 6 }],
+        [2, { name: 'fri', desc: 'Friday', dow: 5 }],
+        [3, { name: 'thu', desc: 'Thursday', dow: 4 }],
+        [4, { name: 'wed', desc: 'Wednesday', dow: 3 }],
+        [5, { name: 'tue', desc: 'Tuesday', dow: 2 }],
+        [6, { name: 'mon', desc: 'Monday', dow: 1 }],
+        [7, { name: 'sun', desc: 'Sunday', dow: 0 }]
+    ]);
+    public scheduleTimeTypes: byteValueMap = new byteValueMap([
+        [0, { name: 'manual', desc: 'Manual' }]
+    ]);
+    public scheduleDisplayTypes: byteValueMap = new byteValueMap([
+        [0, { name: 'always', desc: 'Always' }],
+        [1, { name: 'active', desc: 'When Active' }],
+        [2, { name: 'never', desc: 'Never' }]
+    ]);
+    public pumpTypes: byteValueMap = new byteValueMap([
+        [1, { name: 'vf', desc: 'Intelliflo VF', minFlow: 15, maxFlow: 130, flowStepSize: 1, maxCircuits: 8, hasAddress: true }],
+        [64, { name: 'vsf', desc: 'Intelliflo VSF', minSpeed: 450, maxSpeed: 3450, speedStepSize: 10, minFlow: 15, maxFlow: 130, flowStepSize: 1, maxCircuits: 8, hasAddress: true }],
+        [65, { name: 'ds', desc: 'Two-Speed', maxCircuits: 40, hasAddress: false, hasBody: true }],
+        [128, { name: 'vs', desc: 'Intelliflo VS', maxPrimingTime: 6, minSpeed: 450, maxSpeed: 3450, speedStepSize: 10, maxCircuits: 8, hasAddress: true }],
+        [169, { name: 'vssvrs', desc: 'IntelliFlo VS+SVRS', maxPrimingTime: 6, minSpeed: 450, maxSpeed: 3450, speedStepSize: 10, maxCircuits: 8, hasAddress: true }]
+    ]);
+    public pumpSSModels: byteValueMap = new byteValueMap([
+        [0, { name: 'unspecified', desc: 'Unspecified', amps: 0, pf: 0, volts: 0, watts: 0 }],
+        [1, { name: 'wf1hpE', desc: '1hp WhisperFlo E+', amps: 7.4, pf: .9, volts: 230, watts: 1532 }],
+        [2, { name: 'wf1hpMax', desc: '1hp WhisperFlo Max', amps: 9, pf: .87, volts: 230, watts: 1600 }],
+        [3, { name: 'generic15hp', desc: '1.5hp Pump', amps: 9.3, pf: .9, volts: 230, watts: 1925 }],
+        [4, { name: 'generic2hp', desc: '2hp Pump', amps: 12, pf: .9, volts: 230, watts: 2484 }],
+        [5, { name: 'generic25hp', desc: '2.5hp Pump', amps: 12.5, pf: .9, volts: 230, watts: 2587 }],
+        [6, { name: 'generic3hp', desc: '3hp Pump', amps: 13.5, pf: .9, volts: 230, watts: 2794 }]
+    ]);
+    public pumpDSModels: byteValueMap = new byteValueMap([
+        [0, { name: 'unspecified', desc: 'Unspecified', loAmps: 0, hiAmps: 0, pf: 0, volts: 0, loWatts: 0, hiWatts: 0 }],
+        [1, { name: 'generic1hp', desc: '1hp Pump', loAmps: 2.4, hiAmps: 6.5, pf: .9, volts: 230, loWatts: 497, hiWatts: 1345 }],
+        [2, { name: 'generic15hp', desc: '1.5hp Pump', loAmps: 2.7, hiAmps: 9.3, pf: .9, volts: 230, loWatts: 558, hiWatts: 1925 }],
+        [3, { name: 'generic2hp', desc: '2hp Pump', loAmps: 2.9, hiAmps: 12, pf: .9, volts: 230, loWatts: 600, hiWatts: 2484 }],
+        [4, { name: 'generic25hp', desc: '2.5hp Pump', loAmps: 3.1, hiAmps: 12.5, pf: .9, volts: 230, loWatts: 642, hiWatts: 2587 }],
+        [5, { name: 'generic3hp', desc: '3hp Pump', loAmps: 3.3, hiAmps: 13.5, pf: .9, volts: 230, loWatts: 683, hiWatts: 2794 }]
+    ]);
+    public pumpVSModels: byteValueMap = new byteValueMap([
+        [0, { name: 'intelliflovs', desc: 'IntelliFlo VS' }]
+    ]);
+    public pumpVFModels: byteValueMap = new byteValueMap([
+        [0, { name: 'intelliflovf', desc: 'IntelliFlo VF' }]
+    ]);
+    public pumpVSFModels: byteValueMap = new byteValueMap([
+        [0, { name: 'intelliflovsf', desc: 'IntelliFlo VSF' }]
+    ]);
+    public pumpVSSVRSModels: byteValueMap = new byteValueMap([
+        [0, { name: 'intelliflovssvrs', desc: 'IntelliFlo VS+SVRS' }]
+    ]);
+    // These are used for single-speed pump definitions.  Essentially the way this works is that when
+    // the body circuit is running the single speed pump is on.
+    public pumpBodies: byteValueMap = new byteValueMap([
+        [0, { name: 'pool', desc: 'Pool' }],
+        [101, { name: 'spa', desc: 'Spa' }],
+        [255, { name: 'poolspa', desc: 'Pool/Spa' }]
+    ]);
+    public heaterTypes: byteValueMap = new byteValueMap([
+        [1, { name: 'gas', desc: 'Gas Heater', hasAddress: false }],
+        [2, { name: 'solar', desc: 'Solar Heater', hasAddress: false, hasCoolSetpoint: true, hasPreference: true }],
+        [3, { name: 'heatpump', desc: 'Heat Pump', hasAddress: true, hasPreference: true }],
+        [4, { name: 'ultratemp', desc: 'UltraTemp', hasAddress: true, hasCoolSetpoint: true, hasPreference: true }],
+        [5, { name: 'hybrid', desc: 'Hybrid', hasAddress: true }],
+        [6, { name: 'mastertemp', desc: 'MasterTemp', hasAddress: true }],
+        [7, { name: 'maxetherm', desc: 'Max-E-Therm', hasAddress: true }],
+    ]);
+    public heatModes: byteValueMap = new byteValueMap([
+        [0, { name: 'off', desc: 'Off' }],
+        [3, { name: 'heater', desc: 'Heater' }],
+        [5, { name: 'solar', desc: 'Solar Only' }],
+        [12, { name: 'solarpref', desc: 'Solar Preferred' }]
+    ]);
+    public heatSources: byteValueMap = new byteValueMap([
+        [0, { name: 'off', desc: 'No Heater' }],
+        [3, { name: 'heater', desc: 'Heater' }],
+        [5, { name: 'solar', desc: 'Solar Only' }],
+        [21, { name: 'solarpref', desc: 'Solar Preferred' }],
+        [32, { name: 'nochange', desc: 'No Change' }]
+    ]);
+    public heatStatus: byteValueMap = new byteValueMap([
+        [0, { name: 'off', desc: 'Off' }],
+        [1, { name: 'heater', desc: 'Heater' }],
+        [2, { name: 'solar', desc: 'Solar' }],
+        [3, { name: 'cooling', desc: 'Cooling' }],
+        [128, { name: 'cooldown', desc: 'Cooldown' }]
+    ]);
+    public pumpStatus: byteValueMap = new byteValueMap([
+        [0, { name: 'off', desc: 'Off' }], // When the pump is disconnected or has no power then we simply report off as the status.  This is not the recommended wiring
+        // for a VS/VF pump as is should be powered at all times.  When it is, the status will always report a value > 0.
+        [1, { name: 'ok', desc: 'Ok' }], // Status is always reported when the pump is not wired to a relay regardless of whether it is on or not
+        // as is should be if this is a VS / VF pump.  However if it is wired to a relay most often filter, the pump will report status
+        // 0 if it is not running.  Essentially this is no error but it is not a status either.
+        [2, { name: 'filter', desc: 'Filter warning' }],
+        [3, { name: 'overcurrent', desc: 'Overcurrent condition' }],
+        [4, { name: 'priming', desc: 'Priming' }],
+        [5, { name: 'blocked', desc: 'System blocked' }],
+        [6, { name: 'general', desc: 'General alarm' }],
+        [7, { name: 'overtemp', desc: 'Overtemp condition' }],
+        [8, { name: 'power', dec: 'Power outage' }],
+        [9, { name: 'overcurrent2', desc: 'Overcurrent condition 2' }],
+        [10, { name: 'overvoltage', desc: 'Overvoltage condition' }],
+        [11, { name: 'error11', desc: 'Unspecified Error 11' }],
+        [12, { name: 'error12', desc: 'Unspecified Error 12' }],
+        [13, { name: 'error13', desc: 'Unspecified Error 13' }],
+        [14, { name: 'error14', desc: 'Unspecified Error 14' }],
+        [15, { name: 'error15', desc: 'Unspecified Error 15' }],
+        [16, { name: 'commfailure', desc: 'Communication failure' }]
+    ]);
+    public pumpUnits: byteValueMap = new byteValueMap([
+        [0, { name: 'rpm', desc: 'RPM' }],
+        [1, { name: 'gpm', desc: 'GPM' }]
+    ]);
+    public bodyTypes: byteValueMap = new byteValueMap([
+        [0, { name: 'pool', desc: 'Pool' }],
+        [1, { name: 'spa', desc: 'Spa' }],
+        [2, { name: 'spa', desc: 'Spa' }],
+        [3, { name: 'spa', desc: 'Spa' }]
+    ]);
+    public bodies: byteValueMap = new byteValueMap([
+        [0, { name: 'pool', desc: 'Pool' }],
+        [1, { name: 'spa', desc: 'Spa' }],
+        [2, { name: 'body3', desc: 'Body 3' }],
+        [3, { name: 'body4', desc: 'Body 4' }],
+        [32, { name: 'poolspa', desc: 'Pool/Spa' }]
+    ]);
+    public chlorinatorStatus: byteValueMap = new byteValueMap([
+        [0, { name: 'ok', desc: 'Ok' }],
+        [1, { name: 'lowflow', desc: 'Low Flow' }],
+        [2, { name: 'lowsalt', desc: 'Low Salt' }],
+        [3, { name: 'verylowsalt', desc: 'Very Low Salt' }],
+        [4, { name: 'highcurrent', desc: 'High Current' }],
+        [5, { name: 'clean', desc: 'Clean Cell' }],
+        [6, { name: 'lowvoltage', desc: 'Low Voltage' }],
+        [7, { name: 'lowtemp', desc: 'Water Temp Low' }],
+        [8, { name: 'commlost', desc: 'Communication Lost' }]
+    ]);
+    public chlorinatorType: byteValueMap = new byteValueMap([
+        [0, { name: 'pentair', desc: 'Pentair' }],
+        [1, { name: 'unknown', desc: 'unknown' }],
+        [2, { name: 'aquarite', desc: 'Aquarite' }],
+        [3, { name: 'unknown', desc: 'unknown' }]
+    ]);
+    public chlorinatorModel: byteValueMap = new byteValueMap([
+        [0, { name: 'unknown', desc: 'unknown', capacity: 0, chlorinePerDay: 0, chlorinePerSec: 0 }],
+        [1, { name: 'intellichlor--15', desc: 'IntelliChlor IC15', capacity: 15000, chlorinePerDay: 0.60, chlorinePerSec: 0.60 / 86400 }],
+        [2, { name: 'intellichlor--20', desc: 'IntelliChlor IC20', capacity: 20000, chlorinePerDay: 0.70, chlorinePerSec: 0.70 / 86400 }],
+        [3, { name: 'intellichlor--40', desc: 'IntelliChlor IC40', capacity: 40000, chlorinePerDay: 1.40, chlorinePerSec: 1.4 / 86400 }],
+        [4, { name: 'intellichlor--60', desc: 'IntelliChlor IC60', capacity: 60000, chlorinePerDay: 2, chlorinePerSec: 2 / 86400 }],
+        [5, { name: 'aquarite-t15', desc: 'AquaRite T15', capacity: 40000, chlorinePerDay: 1.47, chlorinePerSec: 1.47 / 86400 }],
+        [6, { name: 'aquarite-t9', desc: 'AquaRite T9', capacity: 30000, chlorinePerDay: 0.98, chlorinePerSec: 0.98 / 86400 }],
+        [7, { name: 'aquarite-t5', desc: 'AquaRite T5', capacity: 20000, chlorinePerDay: 0.735, chlorinePerSec: 0.735 / 86400 }],
+        [8, { name: 'aquarite-t3', desc: 'AquaRite T3', capacity: 15000, chlorinePerDay: 0.53, chlorinePerSec: 0.53 / 86400 }],
+        [9, { name: 'aquarite-925', desc: 'AquaRite 925', capacity: 25000, chlorinePerDay: 0.98, chlorinePerSec: 0.98 / 86400 }],
+        [10, { name: 'aquarite-940', desc: 'AquaRite 940', capacity: 40000, chlorinePerDay: 1.47, chlorinePerSec: 1.47 / 86400 }]
+    ])
+    public customNames: byteValueMap = new byteValueMap();
+    public circuitNames: byteValueMap = new byteValueMap();
+    public scheduleTypes: byteValueMap = new byteValueMap([
+        [0, { name: 'runonce', desc: 'Run Once', startDate: true, startTime: true, endTime: true, days: false, heatSource: true, heatSetpoint: true }],
+        [128, { name: 'repeat', desc: 'Repeats', startDate: false, startTime: true, endTime: true, days: 'multi', heatSource: true, heatSetpoint: true }]
+    ]);
+    public circuitGroupTypes: byteValueMap = new byteValueMap([
+        [0, { name: 'none', desc: 'Unspecified' }],
+        [1, { name: 'light', desc: 'Light' }],
+        [2, { name: 'circuit', desc: 'Circuit' }],
+        [3, { name: 'intellibrite', desc: 'IntelliBrite' }]
+    ]);
+    public groupCircuitStates: byteValueMap = new byteValueMap([
+        [0, { name: 'off', desc: 'Off' }],
+        [1, { name: 'on', desc: 'On' }]
+    ]);
+    public systemUnits: byteValueMap = new byteValueMap([
+        [0, { name: 'english', desc: 'English' }],
+        [4, { name: 'metric', desc: 'Metric' }]
+    ]);
+    public tempUnits: byteValueMap = new byteValueMap([
+        [0, { name: 'F', desc: 'Fahrenheit' }],
+        [4, { name: 'C', desc: 'Celsius' }]
+    ]);
+    public valveTypes: byteValueMap = new byteValueMap([
+        [0, { name: 'standard', desc: 'Standard' }],
+        [1, { name: 'intellivalve', desc: 'IntelliValve' }]
+    ]);
+    public valveModes: byteValueMap = new byteValueMap([
+        [0, { name: 'off', desc: 'Off' }],
+        [1, { name: 'pool', desc: 'Pool' }],
+        [2, { name: 'spa', dest: 'Spa' }],
+        [3, { name: 'spillway', desc: 'Spillway' }],
+        [4, { name: 'spadrain', desc: 'Spa Drain' }]
+    ]);
   public msgBroadcastActions: byteValueMap = new byteValueMap([
     [2, { name: 'status', desc: 'Equipment Status' }],
     [82, { name: 'ivstatus', desc: 'IntelliValve Status' }]
@@ -564,6 +615,18 @@ export class byteValueMaps {
     [0, { name: 'base', desc: 'Base pH+' }],
     [1, { name: 'acid', desc: 'Acid pH-' }]
   ]);
+    public phDoserTypes: byteValueMap = new byteValueMap([
+        [0, { name: 'none', desc: 'No Doser Attached' }],
+        [1, { name: 'extrelay', desc: 'External Relay' }],
+        [2, { name: 'co2', desc: 'CO2 Tank' }],
+        [3, { name: 'intrelay', desc: 'Internal Relay'}]
+    ]);
+    public orpDoserTypes: byteValueMap = new byteValueMap([
+        [0, { name: 'none', desc: 'No Doser Attached' }],
+        [1, { name: 'extrelay', desc: 'External Relay' }],
+        [2, { name: 'chlorinator', desc: 'Chlorinator'}],
+        [3, { name: 'intrelay', desc: 'Internal Relay'}]
+    ])
   public volumeUnits: byteValueMap = new byteValueMap([
     [0, { name: '', desc: 'No Units' }],
     [1, { name: 'gal', desc: 'Gallons' }],
@@ -592,29 +655,31 @@ export class byteValueMaps {
     [1, { name: 'nocomms', desc: 'No Communication' }],
     [2, { name: 'config', desc: 'Invalid Configuration' }]
   ]);
-  public chemControllerAlarms: byteValueMap = new byteValueMap([
-    [0, { name: 'ok', desc: 'Ok - No alarm' }],
-    [1, { name: 'noflow', desc: 'No Flow Detected' }],
-    [2, { name: 'phhigh', desc: 'pH Level High' }],
-    [4, { name: 'phlow', desc: 'pH Level Low' }],
-    [8, { name: 'orphigh', desc: 'orp Level High' }],
-    [16, { name: 'orplow', desc: 'orp Level Low' }],
-    [32, { name: 'phtankempty', desc: 'pH Tank Empty' }],
-    [64, { name: 'orptankempty', desc: 'orp Tank Empty' }],
-    [128, { name: 'probefault', desc: 'Probe Fault' }],
-    [129, { name: 'phtanklow', desc: 'pH Tank Low' }],
-    [130, { name: 'orptanklow', desc: 'orp Tank Low' }]
-  ]);
-  public chemControllerHardwareFaults: byteValueMap = new byteValueMap([
-    [0, { name: 'ok', desc: 'Ok - No Faults' }],
-    [1, { name: 'phprobe', desc: 'pH Probe Fault' }],
-    [2, { name: 'phpump', desc: 'pH Pump Fault' }],
-    [3, { name: 'orpprobe', desc: 'ORP Probe Fault' }],
-    [4, { name: 'orppump', desc: 'ORP Pump Fault' }],
-    [5, { name: 'chlormismatch', desc: 'Chlorinator body mismatch' }],
-    [6, { name: 'invalidbody', desc: 'Body capacity not valid' }],
-    [7, { name: 'flowsensor', desc: 'Flow Sensor Fault' }]
-  ]);
+    public chemControllerAlarms: byteValueMap = new byteValueMap([
+        [0, { name: 'ok', desc: 'Ok - No alarm' }],
+        [1, { name: 'noflow', desc: 'No Flow Detected' }],
+        [2, { name: 'phhigh', desc: 'pH Level High' }],
+        [4, { name: 'phlow', desc: 'pH Level Low' }],
+        [8, { name: 'orphigh', desc: 'orp Level High' }],
+        [16, { name: 'orplow', desc: 'orp Level Low' }],
+        [32, { name: 'phtankempty', desc: 'pH Tank Empty' }],
+        [64, { name: 'orptankempty', desc: 'orp Tank Empty' }],
+        [128, { name: 'probefault', desc: 'Probe Fault' }],
+        [129, { name: 'phtanklow', desc: 'pH Tank Low' }],
+        [130, { name: 'orptanklow', desc: 'orp Tank Low' }],
+        [131, { name: 'freezeprotect', desc: 'Freeze Protection Lockout'}]
+    ]);
+    public chemControllerHardwareFaults: byteValueMap = new byteValueMap([
+        [0, { name: 'ok', desc: 'Ok - No Faults' }],
+        [1, { name: 'phprobe', desc: 'pH Probe Fault' }],
+        [2, { name: 'phpump', desc: 'pH Pump Fault' }],
+        [3, { name: 'orpprobe', desc: 'ORP Probe Fault' }],
+        [4, { name: 'orppump', desc: 'ORP Pump Fault' }],
+        [5, { name: 'chlormismatch', desc: 'Chlorinator body mismatch' }],
+        [6, { name: 'invalidbody', desc: 'Body capacity not valid' }],
+        [7, { name: 'flowsensor', desc: 'Flow Sensor Fault' }]
+
+    ]);
   public chemControllerWarnings: byteValueMap = new byteValueMap([
     [0, { name: 'ok', desc: 'Ok - No Warning' }],
     [1, { name: 'corrosive', desc: 'Corrosion May Occur' }],
@@ -1319,120 +1384,125 @@ export class BodyCommands extends BoardCommands {
   }
   public freezeProtectBodyOn: Date;
   public freezeProtectStart: Date;
-  public async syncFreezeProtection() {
-    try {
-      // Go through all the features and circuits to make sure we have the freeze protect set appropriately.  The freeze
-      // flag will have already been set whether this is a Nixie setup or there is an OCP involved.
+    public async syncFreezeProtection() {
+        try {
+            // Go through all the features and circuits to make sure we have the freeze protect set appropriately.  The freeze
+            // flag will have already been set whether this is a Nixie setup or there is an OCP involved.
 
-      // First turn on/off any features that are in our control that should be under our control.  If this is an OCP we
-      // do not create features beyond those controlled by the OCP so we don't need to check these in that condition.  That is
-      // why it first checks the controller type.
-      let freeze = utils.makeBool(state.freeze);
-      if (sys.controllerType === ControllerType.Nixie) {
-        // If we are a Nixie controller we need to evaluate the current freeze settings against the air temperature.
-        if (typeof state.temps.air !== 'undefined') freeze = state.temps.air <= sys.general.options.freezeThreshold;
-        else freeze = false;
-
-        // We need to know when we first turned the freeze protection on. This is because we will be rotating between pool and spa
-        // on shared body systems when both pool and spa have freeze protection checked.
-        if (state.freeze !== freeze) {
-          this.freezeProtectStart = freeze ? new Date() : undefined;
-          state.freeze = freeze;
-        }
-        for (let i = 0; i < sys.features.length; i++) {
-          let feature = sys.features.getItemByIndex(i);
-          let fstate = state.features.getItemById(feature.id, true);
-          if (!feature.freeze || !feature.isActive === true || feature.master !== 1) {
-            fstate.freezeProtect = false;
-            continue; // This is not affected by freeze conditions.
-          }
-          if (freeze && !fstate.isOn) {
-            // This feature should be on because we are freezing.
-            fstate.freezeProtect = true;
-            await sys.board.features.setFeatureStateAsync(feature.id, true);
-          }
-          else if (!freeze && fstate.freezeProtect) {
-            // This feature was turned on by freeze protection.  We need to turn it off because it has warmed up.
-            fstate.freezeProtect = false;
-            await sys.board.features.setFeatureStateAsync(feature.id, false);
-          }
-        }
-      }
-      let bodyRotationChecked = false;
-      for (let i = 0; i < sys.circuits.length; i++) {
-        let circ = sys.circuits.getItemByIndex(i);
-        let cstate = state.circuits.getItemById(circ.id);
-        if (!circ.freeze || !circ.isActive === true || circ.master !== 1) {
-          cstate.freezeProtect = false;
-          continue; // This is not affected by freeze conditions.
-        }
-        if (sys.equipment.shared && freeze && (circ.id === 1 || circ.id === 6)) {
-          // Exit out of here because we already checked the body rotation.  We only want to do this once since it can be expensive turning
-          // on a particular body.
-          if (bodyRotationChecked) continue;
-          // These are our body circuits so we need to check to see if they need to be rotated between pool and spa.
-          let pool = circ.id === 6 ? circ : sys.circuits.getItemById(6);
-          let spa = circ.id === 1 ? circ : sys.circuits.getItemById(1);
-          if (pool.freeze && spa.freeze) {
-            // We only need to rotate between pool and spa when they are both checked.
-            let pstate = circ.id === 6 ? cstate : state.circuits.getItemById(6);
-            let sstate = circ.id === 1 ? cstate : state.circuits.getItemById(1);
-            if (!pstate.isOn && !sstate.isOn) {
-              // Neither the pool or spa are on so we will turn on the pool first.
-              pstate.freezeProtect = true;
-              this.freezeProtectBodyOn = new Date();
-              await sys.board.circuits.setCircuitStateAsync(6, true);
-            }
-            else {
-              // If neither of the bodies were turned on for freeze protection then we need to ignore this. 
-              if (!pstate.freezeProtect && !sstate.freezeProtect) {
-                this.freezeProtectBodyOn = undefined;
-                continue;
-              }
-
-              // One of the two bodies is on so we need to check for the rotation.  If it is time to rotate do the rotation.
-              if (typeof this.freezeProtectBodyOn === 'undefined') this.freezeProtectBodyOn = new Date();
-              let dt = new Date().getTime();
-              if (dt - 1000 * 60 * 15 > this.freezeProtectBodyOn.getTime()) {
-                logger.info(`Swapping bodies for freeze protection pool:${pstate.isOn} spa:${sstate.isOn} interval: ${utils.formatDuration(dt - this.freezeProtectBodyOn.getTime() / 1000)}`);
-                // 10 minutes has elapsed so we will be rotating to the other body.
-                if (pstate.isOn) {
-                  // The setCircuitState method will handle turning off the pool body.
-                  sstate.freezeProtect = true;
-                  pstate.freezeProtect = false;
-                  await sys.board.circuits.setCircuitStateAsync(1, true);
+            // First turn on/off any features that are in our control that should be under our control.  If this is an OCP we
+            // do not create features beyond those controlled by the OCP so we don't need to check these in that condition.  That is
+            // why it first checks the controller type.
+            let freeze = utils.makeBool(state.freeze);
+            if (sys.controllerType === ControllerType.Nixie) {
+                // If we are a Nixie controller we need to evaluate the current freeze settings against the air temperature.
+                if (typeof state.temps.air !== 'undefined') {
+                    // Start freeze protection when the temperature is <= the threshold but don't stop it until we are 2 degrees above the threshold.  This
+                    // makes for a 3 degree offset.
+                    if (state.temps.air <= sys.general.options.freezeThreshold) freeze = true;
+                    else if (state.freeze && state.temps.air - 2 > sys.general.options.freezeThreshold) freeze = false;
                 }
-                else {
-                  sstate.freezeProtect = false;
-                  pstate.freezeProtect = true;
-                  await sys.board.circuits.setCircuitStateAsync(6, true);
+                else freeze = false;
+
+                // We need to know when we first turned the freeze protection on. This is because we will be rotating between pool and spa
+                // on shared body systems when both pool and spa have freeze protection checked.
+                if (state.freeze !== freeze) {
+                    this.freezeProtectStart = freeze ? new Date() : undefined;
+                    state.freeze = freeze;
                 }
-                // Set a new date as this will be our rotation check now.
-                this.freezeProtectBodyOn = new Date();
-              }
+                for (let i = 0; i < sys.features.length; i++) {
+                    let feature = sys.features.getItemByIndex(i);
+                    let fstate = state.features.getItemById(feature.id, true);
+                    if (!feature.freeze || !feature.isActive === true || feature.master !== 1) {
+                        fstate.freezeProtect = false;
+                        continue; // This is not affected by freeze conditions.
+                    }
+                    if (freeze && !fstate.isOn) {
+                        // This feature should be on because we are freezing.
+                        fstate.freezeProtect = true;
+                        await sys.board.features.setFeatureStateAsync(feature.id, true);
+                    }
+                    else if (!freeze && fstate.freezeProtect) {
+                        // This feature was turned on by freeze protection.  We need to turn it off because it has warmed up.
+                        fstate.freezeProtect = false;
+                        await sys.board.features.setFeatureStateAsync(feature.id, false);
+                    }
+                }
             }
-          }
-          else {
-            // Only this circuit is selected for freeze protection so we don't need any special treatment.
-            cstate.freezeProtect = true;
-            if (!cstate.isOn) await sys.board.circuits.setCircuitStateAsync(circ.id, true);
-          }
-          bodyRotationChecked = true;
+            let bodyRotationChecked = false;
+            for (let i = 0; i < sys.circuits.length; i++) {
+                let circ = sys.circuits.getItemByIndex(i);
+                let cstate = state.circuits.getItemById(circ.id);
+                if (!circ.freeze || !circ.isActive === true || circ.master !== 1) {
+                    cstate.freezeProtect = false;
+                    continue; // This is not affected by freeze conditions.
+                }
+                if (sys.equipment.shared && freeze && (circ.id === 1 || circ.id === 6)) {
+                    // Exit out of here because we already checked the body rotation.  We only want to do this once since it can be expensive turning
+                    // on a particular body.
+                    if (bodyRotationChecked) continue;
+                    // These are our body circuits so we need to check to see if they need to be rotated between pool and spa.
+                    let pool = circ.id === 6 ? circ : sys.circuits.getItemById(6);
+                    let spa = circ.id === 1 ? circ : sys.circuits.getItemById(1);
+                    if (pool.freeze && spa.freeze) {
+                        // We only need to rotate between pool and spa when they are both checked.
+                        let pstate = circ.id === 6 ? cstate : state.circuits.getItemById(6);
+                        let sstate = circ.id === 1 ? cstate : state.circuits.getItemById(1);
+                        if (!pstate.isOn && !sstate.isOn) {
+                            // Neither the pool or spa are on so we will turn on the pool first.
+                            pstate.freezeProtect = true;
+                            this.freezeProtectBodyOn = new Date();
+                            await sys.board.circuits.setCircuitStateAsync(6, true);
+                        }
+                        else {
+                            // If neither of the bodies were turned on for freeze protection then we need to ignore this. 
+                            if (!pstate.freezeProtect && !sstate.freezeProtect) {
+                                this.freezeProtectBodyOn = undefined;
+                                continue;
+                            }
+
+                            // One of the two bodies is on so we need to check for the rotation.  If it is time to rotate do the rotation.
+                            if (typeof this.freezeProtectBodyOn === 'undefined') this.freezeProtectBodyOn = new Date();
+                            let dt = new Date().getTime();
+                            if (dt - 1000 * 60 * 15 > this.freezeProtectBodyOn.getTime()) {
+                                logger.info(`Swapping bodies for freeze protection pool:${pstate.isOn} spa:${sstate.isOn} interval: ${utils.formatDuration(dt - this.freezeProtectBodyOn.getTime() / 1000)}`);
+                                // 10 minutes has elapsed so we will be rotating to the other body.
+                                if (pstate.isOn) {
+                                    // The setCircuitState method will handle turning off the pool body.
+                                    sstate.freezeProtect = true;
+                                    pstate.freezeProtect = false;
+                                    await sys.board.circuits.setCircuitStateAsync(1, true);
+                                }
+                                else {
+                                    sstate.freezeProtect = false;
+                                    pstate.freezeProtect = true;
+                                    await sys.board.circuits.setCircuitStateAsync(6, true);
+                                }
+                                // Set a new date as this will be our rotation check now.
+                                this.freezeProtectBodyOn = new Date();
+                            }
+                        }
+                    }
+                    else {
+                        // Only this circuit is selected for freeze protection so we don't need any special treatment.
+                        cstate.freezeProtect = true;
+                        if (!cstate.isOn) await sys.board.circuits.setCircuitStateAsync(circ.id, true);
+                    }
+                    bodyRotationChecked = true;
+                }
+                else if (freeze && !cstate.isOn) {
+                    // This circuit should be on because we are freezing.
+                    cstate.freezeProtect = true;
+                    await sys.board.circuits.setCircuitStateAsync(circ.id, true);
+                }
+                else if (!freeze && cstate.freezeProtect) {
+                    // This feature was turned on by freeze protection.  We need to turn it off because it has warmed up.
+                    await sys.board.circuits.setCircuitStateAsync(circ.id, false);
+                    cstate.freezeProtect = false;
+                }
+            }
         }
-        else if (freeze && !cstate.isOn) {
-          // This circuit should be on because we are freezing.
-          cstate.freezeProtect = true;
-          await sys.board.features.setFeatureStateAsync(circ.id, true);
-        }
-        else if (!freeze && cstate.freezeProtect) {
-          // This feature was turned on by freeze protection.  We need to turn it off because it has warmed up.
-          await sys.board.circuits.setCircuitStateAsync(circ.id, false);
-          cstate.freezeProtect = false;
-        }
-      }
+        catch (err) { logger.error(`syncFreezeProtection: Error synchronizing freeze protection states: ${err.message}`); }
     }
-    catch (err) { logger.error(`syncFreezeProtection: Error synchronizing freeze protection states`); }
-  }
 
   public async initFilters() {
     try {
@@ -1600,7 +1670,7 @@ export class BodyCommands extends BoardCommands {
         heatModes.push(this.board.valueMaps.heatModes.transformByName('off')); // In IC fw 1.047 off is no longer 0.
         let heatTypes = this.board.heaters.getInstalledHeaterTypes(bodyId);
         if (heatTypes.gas > 0) heatModes.push(this.board.valueMaps.heatModes.transformByName('heater'));
-        if (heatTypes.mastertemp > 0) heatModes.push(this.board.valueMaps.heatModes.transformByName('mastertemp'));
+        if (heatTypes.mastertemp > 0) heatModes.push(this.board.valueMaps.heatModes.transformByName('mtheater'));
         if (heatTypes.solar > 0) {
             let hm = this.board.valueMaps.heatModes.transformByName('solar');
             heatModes.push(hm);
@@ -1637,52 +1707,53 @@ export class BodyCommands extends BoardCommands {
     }
     return arrSpas;
   }
-  public getBodyState(bodyCode: number): BodyTempState {
-    let assoc = sys.board.valueMaps.bodies.transform(bodyCode);
-    switch (assoc.name) {
-      case 'body1':
-      case 'pool':
-        return state.temps.bodies.getItemById(1);
-      case 'body2':
-      case 'spa':
-        return state.temps.bodies.getItemById(2);
-      case 'body3':
-        return state.temps.bodies.getItemById(3);
-      case 'body4':
-        return state.temps.bodies.getItemById(4);
-      case 'poolspa':
-        if (sys.equipment.shared && sys.equipment.maxBodies >= 2) {
-          let body = state.temps.bodies.getItemById(1);
-          if (body.isOn) return body;
-          body = state.temps.bodies.getItemById(2);
-          if (body.isOn) return body;
-          return state.temps.bodies.getItemById(1);
+    public getBodyState(bodyCode: number): BodyTempState {
+        let assoc = sys.board.valueMaps.bodies.transform(bodyCode);
+        switch (assoc.name) {
+            case 'body1':
+            case 'pool':
+                return state.temps.bodies.getItemById(1);
+            case 'body2':
+            case 'spa':
+                return state.temps.bodies.getItemById(2);
+            case 'body3':
+                return state.temps.bodies.getItemById(3);
+            case 'body4':
+                return state.temps.bodies.getItemById(4);
+            case 'poolspa':
+                if (sys.equipment.shared && sys.equipment.maxBodies >= 2) {
+                    let body = state.temps.bodies.getItemById(1);
+                    if (body.isOn) return body;
+                    body = state.temps.bodies.getItemById(2);
+                    if (body.isOn) return body;
+                    return state.temps.bodies.getItemById(1);
+                }
+                else
+                    return state.temps.bodies.getItemById(1);
         }
-        else
-          return state.temps.bodies.getItemById(1);
     }
-  }
-  public isBodyOn(bodyCode: number): boolean {
-    let assoc = sys.board.valueMaps.bodies.transform(bodyCode);
-    switch (assoc.name) {
-      case 'body1':
-      case 'pool':
-        return state.temps.bodies.getItemById(1).isOn;
-      case 'body2':
-      case 'spa':
-        return state.temps.bodies.getItemById(2).isOn;
-      case 'body3':
-        return state.temps.bodies.getItemById(3).isOn;
-      case 'body4':
-        return state.temps.bodies.getItemById(4).isOn;
-      case 'poolspa':
-        if (sys.equipment.shared && sys.equipment.maxBodies >= 2)
-          return state.temps.bodies.getItemById(1).isOn || state.temps.bodies.getItemById(2).isOn;
-        else
-          return state.temps.bodies.getItemById(1).isOn;
+    public isBodyOn(bodyCode: number): boolean {
+        let assoc = sys.board.valueMaps.bodies.transform(bodyCode);
+        switch (assoc.name) {
+            case 'body1':
+            case 'pool':
+                return state.temps.bodies.getItemById(1).isOn;
+            case 'body2':
+            case 'spa':
+                return state.temps.bodies.getItemById(2).isOn;
+            case 'body3':
+                return state.temps.bodies.getItemById(3).isOn;
+            case 'body4':
+                return state.temps.bodies.getItemById(4).isOn;
+            case 'poolspa':
+                if (sys.equipment.shared && sys.equipment.maxBodies >= 2) {
+                    return state.temps.bodies.getItemById(1).isOn === true || state.temps.bodies.getItemById(2).isOn === true;
+                }
+                else
+                    return state.temps.bodies.getItemById(1).isOn;
+        }
+        return false;
     }
-    return false;
-  }
 }
 export class PumpCommands extends BoardCommands {
   public async restore(rest: { poolConfig: any, poolState: any }, ctx: any, res: RestoreResults): Promise<boolean> {
@@ -1857,345 +1928,583 @@ export class PumpCommands extends BoardCommands {
     _availCircuits.push({ type: 'none', id: 255, name: 'Remove' });
     return _availCircuits;
   }
+    public setPumpValveDelays(circuitIds: number[], delay?: number) {}
 }
 export class CircuitCommands extends BoardCommands {
-  public async restore(rest: { poolConfig: any, poolState: any }, ctx: any, res: RestoreResults): Promise<boolean> {
-    try {
-      // First delete the circuit/lightGroups that should be removed.
-      for (let i = 0; i < ctx.circuitGroups.remove.length; i++) {
-        let c = ctx.circuitGroups.remove[i];
+    public async restore(rest: { poolConfig: any, poolState: any }, ctx: any, res: RestoreResults): Promise<boolean> {
         try {
-          await sys.board.circuits.deleteCircuitGroupAsync(c);
-          res.addModuleSuccess('circuitGroup', `Remove: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('circuitGroup', `Remove: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      for (let i = 0; i < ctx.lightGroups.remove.length; i++) {
-        let c = ctx.lightGroups.remove[i];
+            // First delete the circuit/lightGroups that should be removed.
+            for (let i = 0; i < ctx.circuitGroups.remove.length; i++) {
+                let c = ctx.circuitGroups.remove[i];
+                try {
+                    await sys.board.circuits.deleteCircuitGroupAsync(c);
+                    res.addModuleSuccess('circuitGroup', `Remove: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('circuitGroup', `Remove: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            for (let i = 0; i < ctx.lightGroups.remove.length; i++) {
+                let c = ctx.lightGroups.remove[i];
+                try {
+                    await sys.board.circuits.deleteLightGroupAsync(c);
+                    res.addModuleSuccess('lightGroup', `Remove: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('lightGroup', `Remove: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            for (let i = 0; i < ctx.circuits.remove.length; i++) {
+                let c = ctx.circuits.remove[i];
+                try {
+                    await sys.board.circuits.deleteCircuitAsync(c);
+                    res.addModuleSuccess('circuit', `Remove: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('circuit', `Remove: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            for (let i = 0; i < ctx.circuits.add.length; i++) {
+                let c = ctx.circuits.add[i];
+                try {
+                    await sys.board.circuits.setCircuitAsync(c);
+                    res.addModuleSuccess('circuit', `Add: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('circuit', `Add: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            for (let i = 0; i < ctx.circuitGroups.add.length; i++) {
+                let c = ctx.circuitGroups.add[i];
+                try {
+                    await sys.board.circuits.setCircuitGroupAsync(c);
+                    res.addModuleSuccess('circuitGroup', `Add: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('circuitGroup', `Add: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            for (let i = 0; i < ctx.lightGroups.add.length; i++) {
+                let c = ctx.lightGroups.add[i];
+                try {
+                    await sys.board.circuits.setLightGroupAsync(c);
+                    res.addModuleSuccess('lightGroup', `Add: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('lightGroup', `Add: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            for (let i = 0; i < ctx.circuits.update.length; i++) {
+                let c = ctx.circuits.update[i];
+                try {
+                    await sys.board.circuits.setCircuitAsync(c);
+                    res.addModuleSuccess('circuit', `Update: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('circuit', `Update: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            for (let i = 0; i < ctx.circuitGroups.update.length; i++) {
+                let c = ctx.circuitGroups.update[i];
+                try {
+                    await sys.board.circuits.setCircuitGroupAsync(c);
+                    res.addModuleSuccess('circuitGroup', `Update: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('circuitGroup', `Update: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            for (let i = 0; i < ctx.lightGroups.update.length; i++) {
+                let c = ctx.lightGroups.update[i];
+                try {
+                    await sys.board.circuits.setLightGroupAsync(c);
+                    res.addModuleSuccess('lightGroup', `Update: ${c.id}-${c.name}`);
+                } catch (err) { res.addModuleError('lightGroup', `Update: ${c.id}-${c.name}: ${err.message}`); }
+            }
+            return true;
+        } catch (err) { logger.error(`Error restoring circuits: ${err.message}`); res.addModuleError('system', `Error restoring circuits/features: ${err.message}`); return false; }
+    }
+    public async validateRestore(rest: { poolConfig: any, poolState: any }, ctxRoot): Promise<boolean> {
         try {
-          await sys.board.circuits.deleteLightGroupAsync(c);
-          res.addModuleSuccess('lightGroup', `Remove: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('lightGroup', `Remove: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      for (let i = 0; i < ctx.circuits.remove.length; i++) {
-        let c = ctx.circuits.remove[i];
+            let ctx = { errors: [], warnings: [], add: [], update: [], remove: [] };
+            // Look at circuits.
+            let cfg = rest.poolConfig;
+            for (let i = 0; i < cfg.circuits.length; i++) {
+                let r = cfg.circuits[i];
+                let c = sys.circuits.find(elem => r.id === elem.id);
+                if (typeof c === 'undefined') ctx.add.push(r);
+                else if (JSON.stringify(c.get()) !== JSON.stringify(r)) ctx.update.push(r);
+            }
+            for (let i = 0; i < sys.circuits.length; i++) {
+                let c = sys.circuits.getItemByIndex(i);
+                let r = cfg.circuits.find(elem => elem.id == c.id);
+                if (typeof r === 'undefined') ctx.remove.push(c.get(true));
+            }
+            ctxRoot.circuits = ctx;
+            ctx = { errors: [], warnings: [], add: [], update: [], remove: [] };
+            for (let i = 0; i < cfg.circuitGroups.length; i++) {
+                let r = cfg.circuitGroups[i];
+                let c = sys.circuitGroups.find(elem => r.id === elem.id);
+                if (typeof c === 'undefined') ctx.add.push(r);
+                else if (JSON.stringify(c.get()) !== JSON.stringify(r)) ctx.update.push(r);
+            }
+            for (let i = 0; i < sys.circuitGroups.length; i++) {
+                let c = sys.circuitGroups.getItemByIndex(i);
+                let r = cfg.circuitGroups.find(elem => elem.id == c.id);
+                if (typeof r === 'undefined') ctx.remove.push(c.get(true));
+            }
+            ctxRoot.circuitGroups = ctx;
+            ctx = { errors: [], warnings: [], add: [], update: [], remove: [] };
+            for (let i = 0; i < cfg.lightGroups.length; i++) {
+                let r = cfg.lightGroups[i];
+                let c = sys.lightGroups.find(elem => r.id === elem.id);
+                if (typeof c === 'undefined') ctx.add.push(r);
+                else if (JSON.stringify(c.get()) !== JSON.stringify(r)) ctx.update.push(r);
+            }
+            for (let i = 0; i < sys.lightGroups.length; i++) {
+                let c = sys.lightGroups.getItemByIndex(i);
+                let r = cfg.lightGroups.find(elem => elem.id == c.id);
+                if (typeof r === 'undefined') ctx.remove.push(c.get(true));
+            }
+            ctxRoot.lightGroups = ctx;
+            return true;
+        } catch (err) { logger.error(`Error validating circuits for restore: ${err.message}`); }
+    }
+    public async checkEggTimerExpirationAsync() {
+        // turn off any circuits that have reached their egg timer;
+        // Nixie circuits we have 100% control over; 
+        // but features/cg/lg may override OCP control
         try {
-          await sys.board.circuits.deleteCircuitAsync(c);
-          res.addModuleSuccess('circuit', `Remove: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('circuit', `Remove: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      for (let i = 0; i < ctx.circuits.add.length; i++) {
-        let c = ctx.circuits.add[i];
+            for (let i = 0; i < sys.circuits.length; i++) {
+                let c = sys.circuits.getItemByIndex(i);
+                let cstate = state.circuits.getItemByIndex(i);
+                if (!cstate.isActive || !cstate.isOn || typeof cstate.endTime === 'undefined') continue;
+                if (c.master === 1) {
+                    await ncp.circuits.checkCircuitEggTimerExpirationAsync(cstate);
+                }
+            }
+            for (let i = 0; i < sys.features.length; i++) {
+                let fstate = state.features.getItemByIndex(i);
+                if (!fstate.isActive || !fstate.isOn || typeof fstate.endTime === 'undefined') continue;
+                if (fstate.endTime.toDate() < new Timestamp().toDate()) {
+                    await sys.board.circuits.setCircuitStateAsync(fstate.id, false);
+                    fstate.emitEquipmentChange();
+                }
+            }
+            for (let i = 0; i < sys.circuitGroups.length; i++) {
+                let cgstate = state.circuitGroups.getItemByIndex(i);
+                if (!cgstate.isActive || !cgstate.isOn || typeof cgstate.endTime === 'undefined') continue;
+                if (cgstate.endTime.toDate() < new Timestamp().toDate()) {
+                    await sys.board.circuits.setCircuitGroupStateAsync(cgstate.id, false);
+                    cgstate.emitEquipmentChange();
+                }
+            }
+            for (let i = 0; i < sys.lightGroups.length; i++) {
+                let lgstate = state.lightGroups.getItemByIndex(i);
+                if (!lgstate.isActive || !lgstate.isOn || typeof lgstate.endTime === 'undefined') continue;
+                if (lgstate.endTime.toDate() < new Timestamp().toDate()) {
+                    await sys.board.circuits.setLightGroupStateAsync(lgstate.id, false);
+                    lgstate.emitEquipmentChange();
+                }
+            }
+        } catch (err) { logger.error(`checkEggTimerExpiration: Error synchronizing circuit relays ${err.message}`); }
+    }
+    public async syncCircuitRelayStates() {
         try {
-          await sys.board.circuits.setCircuitAsync(c);
-          res.addModuleSuccess('circuit', `Add: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('circuit', `Add: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      for (let i = 0; i < ctx.circuitGroups.add.length; i++) {
-        let c = ctx.circuitGroups.add[i];
+            for (let i = 0; i < sys.circuits.length; i++) {
+                // Run through all the controlled circuits to see whether they should be triggered or not.
+                let circ = sys.circuits.getItemByIndex(i);
+                if (circ.master === 1 && circ.isActive) {
+                    let cstate = state.circuits.getItemById(circ.id);
+                    if (cstate.isOn) await ncp.circuits.setCircuitStateAsync(cstate, cstate.isOn);
+                }
+            }
+        } catch (err) { logger.error(`syncCircuitRelayStates: Error synchronizing circuit relays ${err.message}`); }
+    }
+    public syncVirtualCircuitStates() {
         try {
-          await sys.board.circuits.setCircuitGroupAsync(c);
-          res.addModuleSuccess('circuitGroup', `Add: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('circuitGroup', `Add: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      for (let i = 0; i < ctx.lightGroups.add.length; i++) {
-        let c = ctx.lightGroups.add[i];
-        try {
-          await sys.board.circuits.setLightGroupAsync(c);
-          res.addModuleSuccess('lightGroup', `Add: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('lightGroup', `Add: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      for (let i = 0; i < ctx.circuits.update.length; i++) {
-        let c = ctx.circuits.update[i];
-        try {
-          await sys.board.circuits.setCircuitAsync(c);
-          res.addModuleSuccess('circuit', `Update: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('circuit', `Update: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      for (let i = 0; i < ctx.circuitGroups.update.length; i++) {
-        let c = ctx.circuitGroups.update[i];
-        try {
-          await sys.board.circuits.setCircuitGroupAsync(c);
-          res.addModuleSuccess('circuitGroup', `Update: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('circuitGroup', `Update: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      for (let i = 0; i < ctx.lightGroups.add.length; i++) {
-        let c = ctx.lightGroups.update[i];
-        try {
-          await sys.board.circuits.setLightGroupAsync(c);
-          res.addModuleSuccess('lightGroup', `Update: ${c.id}-${c.name}`);
-        } catch (err) { res.addModuleError('lightGroup', `Update: ${c.id}-${c.name}: ${err.message}`); }
-      }
-      return true;
-    } catch (err) { logger.error(`Error restoring circuits: ${err.message}`); res.addModuleError('system', `Error restoring circuits/features: ${err.message}`); return false; }
-  }
-  public async validateRestore(rest: { poolConfig: any, poolState: any }, ctxRoot): Promise<boolean> {
-    try {
-      let ctx = { errors: [], warnings: [], add: [], update: [], remove: [] };
-      // Look at circuits.
-      let cfg = rest.poolConfig;
-      for (let i = 0; i < cfg.circuits.length; i++) {
-        let r = cfg.circuits[i];
-        let c = sys.circuits.find(elem => r.id === elem.id);
-        if (typeof c === 'undefined') ctx.add.push(r);
-        else if (JSON.stringify(c.get()) !== JSON.stringify(r)) ctx.update.push(r);
-      }
-      for (let i = 0; i < sys.circuits.length; i++) {
-        let c = sys.circuits.getItemByIndex(i);
-        let r = cfg.circuits.find(elem => elem.id == c.id);
-        if (typeof r === 'undefined') ctx.remove.push(c.get(true));
-      }
-      ctxRoot.circuits = ctx;
-      ctx = { errors: [], warnings: [], add: [], update: [], remove: [] };
-      for (let i = 0; i < cfg.circuitGroups.length; i++) {
-        let r = cfg.circuitGroups[i];
-        let c = sys.circuitGroups.find(elem => r.id === elem.id);
-        if (typeof c === 'undefined') ctx.add.push(r);
-        else if (JSON.stringify(c.get()) !== JSON.stringify(r)) ctx.update.push(r);
-      }
-      for (let i = 0; i < sys.circuitGroups.length; i++) {
-        let c = sys.circuitGroups.getItemByIndex(i);
-        let r = cfg.circuitGroups.find(elem => elem.id == c.id);
-        if (typeof r === 'undefined') ctx.remove.push(c.get(true));
-      }
-      ctxRoot.circuitGroups = ctx;
-      ctx = { errors: [], warnings: [], add: [], update: [], remove: [] };
-      for (let i = 0; i < cfg.lightGroups.length; i++) {
-        let r = cfg.lightGroups[i];
-        let c = sys.lightGroups.find(elem => r.id === elem.id);
-        if (typeof c === 'undefined') ctx.add.push(r);
-        else if (JSON.stringify(c.get()) !== JSON.stringify(r)) ctx.update.push(r);
-      }
-      for (let i = 0; i < sys.lightGroups.length; i++) {
-        let c = sys.lightGroups.getItemByIndex(i);
-        let r = cfg.lightGroups.find(elem => elem.id == c.id);
-        if (typeof r === 'undefined') ctx.remove.push(c.get(true));
-      }
-      ctxRoot.lightGroups = ctx;
-      return true;
-    } catch (err) { logger.error(`Error validating circuits for restore: ${err.message}`); }
-  }
-  public async checkEggTimerExpirationAsync() {
-    // turn off any circuits that have reached their egg timer;
-    // Nixie circuits we have 100% control over; 
-    // but features/cg/lg may override OCP control
-    try {
-      for (let i = 0; i < sys.circuits.length; i++) {
-        let c = sys.circuits.getItemByIndex(i);
-        let cstate = state.circuits.getItemByIndex(i);
-        if (!cstate.isActive || !cstate.isOn) continue;
-        if (c.master === 1) {
-          await ncp.circuits.checkCircuitEggTimerExpirationAsync(cstate);
-        }
-      }
-      for (let i = 0; i < sys.features.length; i++) {
-        let fstate = state.features.getItemByIndex(i);
-        if (!fstate.isActive || !fstate.isOn) continue;
-        if (fstate.endTime.toDate() < new Timestamp().toDate()) {
-          await sys.board.circuits.setCircuitStateAsync(fstate.id, false);
-          fstate.emitEquipmentChange();
-        }
-      }
-      for (let i = 0; i < sys.circuitGroups.length; i++) {
-        let cgstate = state.circuitGroups.getItemByIndex(i);
-        if (!cgstate.isActive || !cgstate.isOn) continue;
-        if (cgstate.endTime.toDate() < new Timestamp().toDate()) {
-          await sys.board.circuits.setCircuitGroupStateAsync(cgstate.id, false);
-          cgstate.emitEquipmentChange();
-        }
-      }
-      for (let i = 0; i < sys.lightGroups.length; i++) {
-        let lgstate = state.lightGroups.getItemByIndex(i);
-        if (!lgstate.isActive || !lgstate.isOn) continue;
-        if (lgstate.endTime.toDate() < new Timestamp().toDate()) {
-          await sys.board.circuits.setLightGroupStateAsync(lgstate.id, false);
-          lgstate.emitEquipmentChange();
-        }
-      }
-    } catch (err) { logger.error(`checkEggTimerExpiration: Error synchronizing circuit relays ${err.message}`); }
-  }
-  public async syncCircuitRelayStates() {
-    try {
-      for (let i = 0; i < sys.circuits.length; i++) {
-        // Run through all the controlled circuits to see whether they should be triggered or not.
-        let circ = sys.circuits.getItemByIndex(i);
-        if (circ.master === 1 && circ.isActive) {
-          let cstate = state.circuits.getItemById(circ.id);
-          if (cstate.isOn) await ncp.circuits.setCircuitStateAsync(cstate, cstate.isOn);
-        }
-      }
-    } catch (err) { logger.error(`syncCircuitRelayStates: Error synchronizing circuit relays ${err.message}`); }
-  }
-  public syncVirtualCircuitStates() {
-    try {
-      let arrCircuits = sys.board.valueMaps.virtualCircuits.toArray();
-      let poolStates = sys.board.bodies.getPoolStates();
-      let spaStates = sys.board.bodies.getSpaStates();
-      // The following should work for all board types if the virtualCiruit valuemaps use common names.  The circuit ids can be
-      // different as well as the descriptions but these should have common names since they are all derived from existing states.
+            let arrCircuits = sys.board.valueMaps.virtualCircuits.toArray();
+            let poolStates = sys.board.bodies.getPoolStates();
+            let spaStates = sys.board.bodies.getSpaStates();
+            // The following should work for all board types if the virtualCiruit valuemaps use common names.  The circuit ids can be
+            // different as well as the descriptions but these should have common names since they are all derived from existing states.
 
-      // This also removes virtual circuits depending on whether heaters exsits on the bodies.  Not sure why we are doing this
-      // as the body data contains whether a body is heated or not.  Perhapse some attached interface is using
-      // the virtual circuit list as a means to determine whether solar is available.  That is totally flawed if that is the case.
-      for (let i = 0; i < arrCircuits.length; i++) {
-        let vc = arrCircuits[i];
-        let remove = false;
-        let bState = false;
-        let cstate: VirtualCircuitState = null;
-        switch (vc.name) {
-          case 'poolHeater':
-            // If any pool is heating up.
-            remove = true;
-            for (let j = 0; j < poolStates.length; j++) {
-              if (poolStates[j].heaterOptions.total > 0) remove = false;
+            // This also removes virtual circuits depending on whether heaters exsits on the bodies.  Not sure why we are doing this
+            // as the body data contains whether a body is heated or not.  Perhapse some attached interface is using
+            // the virtual circuit list as a means to determine whether solar is available.  That is totally flawed if that is the case.
+            for (let i = 0; i < arrCircuits.length; i++) {
+                let vc = arrCircuits[i];
+                let remove = false;
+                let bState = false;
+                let cstate: VirtualCircuitState = null;
+                switch (vc.name) {
+                    case 'poolHeater':
+                        // If any pool is heating up.
+                        remove = true;
+                        for (let j = 0; j < poolStates.length; j++) {
+                            if (poolStates[j].heaterOptions.total > 0) remove = false;
+                        }
+                        if (!remove) {
+                            // Determine whether the pool heater is on.
+                            for (let j = 0; j < poolStates.length; j++) {
+                                if (sys.board.valueMaps.heatStatus.getName(poolStates[j].heatStatus) === 'heater') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 1 && x.startupDelay === true && x.type.name !== 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+                        break;
+                    case 'spaHeater':
+                        remove = true;
+                        for (let j = 0; j < spaStates.length; j++) {
+                            if (spaStates[j].heaterOptions.total > 0) remove = false;
+                        }
+                        if (!remove) {
+                            // Determine whether the spa heater is on.
+                            for (let j = 0; j < spaStates.length; j++) {
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'heater') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 1 && x.startupDelay === true && x.type.name !== 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                            //for (let j = 0; j < spaStates.length; j++) {
+                            //    if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'heater') bState = true;
+                            //}
+                        }
+                        break;
+                    case 'freeze':
+                        // If freeze protection has been turned on.
+                        bState = state.freeze;
+                        break;
+                    case 'poolSpa':
+                        // If any pool or spa is on
+                        for (let j = 0; j < poolStates.length && !bState; j++) {
+                            if (poolStates[j].isOn) bState = true;
+                        }
+                        for (let j = 0; j < spaStates.length && !bState; j++) {
+                            if (spaStates[j].isOn) bState = true;
+                        }
+                        break;
+                    case 'solarHeat':
+                    case 'solar':
+                        // If solar is on for any body
+                        remove = true;
+                        for (let j = 0; j < poolStates.length; j++) {
+                            if (poolStates[j].heaterOptions.solar + poolStates[j].heaterOptions.heatpump > 0) remove = false;
+                        }
+                        if (remove) {
+                            for (let j = 0; j < spaStates.length; j++) {
+                                if (spaStates[j].heaterOptions.solar + spaStates[j].heaterOptions.heatpump > 0) remove = false;
+                            }
+                        }
+                        if (!remove) {
+                            for (let j = 0; j < poolStates.length && !bState; j++) {
+                                if (sys.board.valueMaps.heatStatus.getName(poolStates[j].heatStatus) === 'solar') bState = true;
+                            }
+                            for (let j = 0; j < spaStates.length && !bState; j++) {
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') bState = true;
+                            }
+                        }
+                        break;
+                    case 'solar1':
+                        remove = true;
+                        for (let j = 0; j < poolStates.length; j++) {
+                            if (poolStates[j].id === 1 && poolStates[j].heaterOptions.solar) {
+                                remove = false;
+                                vc.desc = `${poolStates[j].name} Solar`;
+                                if (sys.board.valueMaps.heatStatus.getName(poolStates[j].heatStatus) === 'solar') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 1 && x.startupDelay === true && x.type.name === 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+                        for (let j = 0; j < spaStates.length; j++) {
+                            if (spaStates[j].id === 1 && spaStates[j].heaterOptions.solar) {
+                                remove = false;
+                                vc.desc = `${spaStates[j].name} Solar`;
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 1 && x.startupDelay === true && x.type.name === 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+
+                        break;
+                    case 'solar2':
+                        remove = true;
+                        for (let j = 0; j < poolStates.length; j++) {
+                            if (poolStates[j].id === 2 && poolStates[j].heaterOptions.solar) {
+                                remove = false;
+                                vc.desc = `${poolStates[j].name} Solar`;
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 2 && x.startupDelay === true && x.type.name === 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+                        for (let j = 0; j < spaStates.length; j++) {
+                            if (spaStates[j].id === 2 && spaStates[j].heaterOptions.solar) {
+                                remove = false;
+                                vc.desc = `${spaStates[j].name} Solar`;
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 2 && x.startupDelay === true && x.type.name === 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+                        break;
+                    case 'solar3':
+                        remove = true;
+                        for (let j = 0; j < poolStates.length; j++) {
+                            if (poolStates[j].id === 3 && poolStates[j].heaterOptions.solar) {
+                                remove = false;
+                                vc.desc = `${poolStates[j].name} Solar`;
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 3 && x.startupDelay === true && x.type.name === 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+                        for (let j = 0; j < spaStates.length; j++) {
+                            if (spaStates[j].id === 3 && spaStates[j].heaterOptions.solar) {
+                                remove = false;
+                                vc.desc = `${spaStates[j].name} Solar`;
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 3 && x.startupDelay === true && x.type.name === 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+
+                        break;
+                    case 'solar4':
+                        remove = true;
+                        for (let j = 0; j < poolStates.length; j++) {
+                            if (poolStates[j].id === 4 && poolStates[j].heaterOptions.solar) {
+                                remove = false;
+                                vc.desc = `${poolStates[j].name} Solar`;
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 4 && x.startupDelay === true && x.type.name === 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+                        for (let j = 0; j < spaStates.length; j++) {
+                            if (spaStates[j].id === 4 && spaStates[j].heaterOptions.solar) {
+                                remove = false;
+                                vc.desc = `${spaStates[j].name} Solar`;
+                                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') {
+                                    // In this instance we may have a delay underway.
+                                    let hstate = state.heaters.find(x => x.bodyId === 4 && x.startupDelay === true && x.type.name === 'solar');
+                                    bState = typeof hstate === 'undefined';
+                                }
+                            }
+                        }
+                        break;
+                    case 'heater':
+                        remove = true;
+                        for (let j = 0; j < poolStates.length; j++) {
+                            if (poolStates[j].heaterOptions.total > 0) remove = false;
+                        }
+                        if (remove) {
+                            for (let j = 0; j < spaStates.length; j++) {
+                                if (spaStates[j].heaterOptions.total > 0) remove = false;
+                            }
+                        }
+                        if (!remove) {
+                            for (let j = 0; j < poolStates.length && !bState; j++) {
+                                let heat = sys.board.valueMaps.heatStatus.getName(poolStates[j].heatStatus);
+                                if (heat !== 'off') bState = true;
+                            }
+                            for (let j = 0; j < spaStates.length && !bState; j++) {
+                                let heat = sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus);
+                                if (heat !== 'off') bState = true;
+                            }
+                        }
+                        break;
+                    default:
+                        remove = true;
+                        break;
+                }
+                if (remove) {
+                    if (state.virtualCircuits.exists(x => vc.val === x.id)) {
+                        cstate = state.virtualCircuits.getItemById(vc.val, true);
+                        cstate.isActive = false;
+                        cstate.emitEquipmentChange();
+                    }
+                    state.virtualCircuits.removeItemById(vc.val);
+                }
+                else {
+                    cstate = state.virtualCircuits.getItemById(vc.val, true);
+                    cstate.isActive = true;
+                    if (cstate !== null) {
+                        cstate.isOn = bState;
+                        cstate.type = vc.val;
+                        cstate.name = vc.desc;
+                    }
+                }
             }
-            if (!remove) {
-              // Determine whether the pool heater is on.
-              for (let j = 0; j < poolStates.length; j++)
-                if (sys.board.valueMaps.heatStatus.getName(poolStates[j].heatStatus) === 'heater') bState = true;
-            }
-            break;
-          case 'spaHeater':
-            remove = true;
-            for (let j = 0; j < spaStates.length; j++) {
-              if (spaStates[j].heaterOptions.total > 0) remove = false;
-            }
-            if (!remove) {
-              // Determine whether the spa heater is on.
-              for (let j = 0; j < spaStates.length; j++) {
-                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'heater') bState = true;
-              }
-            }
-            break;
-          case 'freeze':
-            // If freeze protection has been turned on.
-            bState = state.freeze;
-            break;
-          case 'poolSpa':
-            // If any pool or spa is on
-            for (let j = 0; j < poolStates.length && !bState; j++) {
-              if (poolStates[j].isOn) bState = true;
-            }
-            for (let j = 0; j < spaStates.length && !bState; j++) {
-              if (spaStates[j].isOn) bState = true;
-            }
-            break;
-          case 'solarHeat':
-          case 'solar':
-            // If solar is on for any body
-            remove = true;
-            for (let j = 0; j < poolStates.length; j++) {
-              if (poolStates[j].heaterOptions.solar + poolStates[j].heaterOptions.heatpump > 0) remove = false;
-            }
-            if (remove) {
-              for (let j = 0; j < spaStates.length; j++) {
-                if (spaStates[j].heaterOptions.solar + spaStates[j].heaterOptions.heatpump > 0) remove = false;
-              }
-            }
-            if (!remove) {
-              for (let j = 0; j < poolStates.length && !bState; j++) {
-                if (sys.board.valueMaps.heatStatus.getName(poolStates[j].heatStatus) === 'solar') bState = true;
-              }
-              for (let j = 0; j < spaStates.length && !bState; j++) {
-                if (sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus) === 'solar') bState = true;
-              }
-            }
-            break;
-          case 'heater':
-            remove = true;
-            for (let j = 0; j < poolStates.length; j++) {
-              if (poolStates[j].heaterOptions.total > 0) remove = false;
-            }
-            if (remove) {
-              for (let j = 0; j < spaStates.length; j++) {
-                if (spaStates[j].heaterOptions.total > 0) remove = false;
-              }
-            }
-            if (!remove) {
-              for (let j = 0; j < poolStates.length && !bState; j++) {
-                let heat = sys.board.valueMaps.heatStatus.getName(poolStates[j].heatStatus);
-                if (heat !== 'off') bState = true;
-              }
-              for (let j = 0; j < spaStates.length && !bState; j++) {
-                let heat = sys.board.valueMaps.heatStatus.getName(spaStates[j].heatStatus);
-                if (heat !== 'off') bState = true;
-              }
-            }
-            break;
-          default:
-            remove = true;
-            break;
-        }
-        if (remove)
-          state.virtualCircuits.removeItemById(vc.val);
-        else {
-          cstate = state.virtualCircuits.getItemById(vc.val, true);
-          if (cstate !== null) {
-            cstate.isOn = bState;
-            cstate.type = vc.val;
-            cstate.name = vc.desc;
-          }
-        }
-      }
-    } catch (err) { logger.error(`Error syncronizing virtual circuits`); }
-  }
-  public async setCircuitStateAsync(id: number, val: boolean): Promise<ICircuitState> {
-    sys.board.suspendStatus(true);
-    try {
-      // We need to do some routing here as it is now critical that circuits, groups, and features
-      // have their own processing.  The virtual controller used to only deal with one circuit.
-      if (sys.board.equipmentIds.circuitGroups.isInRange(id))
-        return await sys.board.circuits.setCircuitGroupStateAsync(id, val);
-      else if (sys.board.equipmentIds.features.isInRange(id))
-        return await sys.board.features.setFeatureStateAsync(id, val);
-      let circuit: ICircuit = sys.circuits.getInterfaceById(id, false, { isActive: false });
-      if (isNaN(id)) return Promise.reject(new InvalidEquipmentIdError(`Circuit or Feature id ${id} not valid`, id, 'Circuit'));
-      let circ = state.circuits.getInterfaceById(id, circuit.isActive !== false);
-      let newState = utils.makeBool(val);
-      // First, if we are turning the circuit on, lets determine whether the circuit is a pool or spa circuit and if this is a shared system then we need
-      // to turn off the other body first.
-      //[12, { name: 'pool', desc: 'Pool', hasHeatSource: true }],
-      //[13, { name: 'spa', desc: 'Spa', hasHeatSource: true }]
-      let func = sys.board.valueMaps.circuitFunctions.get(circuit.type);
-      if (newState && (func.name === 'pool' || func.name === 'spa') && sys.equipment.shared === true) {
-        // If we are shared we need to turn off the other circuit.
-        let offType = func.name === 'pool' ? sys.board.valueMaps.circuitFunctions.getValue('spa') : sys.board.valueMaps.circuitFunctions.getValue('pool');
-        let off = sys.circuits.get().filter(elem => elem.type === offType);
-        // Turn the circuits off that are part of the shared system.  We are going back to the board
-        // just in case we got here for a circuit that isn't on the current defined panel.
-        for (let i = 0; i < off.length; i++) {
-          let coff = off[i];
-          await sys.board.circuits.setCircuitStateAsync(coff.id, false);
-        }
-      }
-      if (id === 6) state.temps.bodies.getItemById(1, true).isOn = val;
-      else if (id === 1) state.temps.bodies.getItemById(2, true).isOn = val;
-      // Let the main nixie controller set the circuit state and affect the relays if it needs to.
-      await ncp.circuits.setCircuitStateAsync(circ, newState);
-      await sys.board.syncEquipmentItems();
-      return state.circuits.getInterfaceById(circ.id);
+        } catch (err) { logger.error(`Error syncronizing virtual circuits`); }
     }
-    catch (err) { return Promise.reject(`Nixie: Error setCircuitStateAsync ${err.message}`); }
-    finally {
-      ncp.pumps.syncPumpStates();
-      sys.board.suspendStatus(false);
-      state.emitEquipmentChanges();
+    public async setCircuitStateAsync(id: number, val: boolean, ignoreDelays?: boolean): Promise<ICircuitState> {
+        sys.board.suspendStatus(true);
+        try {
+            // We need to do some routing here as it is now critical that circuits, groups, and features
+            // have their own processing.  The virtual controller used to only deal with one circuit.
+            if (sys.board.equipmentIds.circuitGroups.isInRange(id))
+                return await sys.board.circuits.setCircuitGroupStateAsync(id, val);
+            else if (sys.board.equipmentIds.features.isInRange(id))
+                return await sys.board.features.setFeatureStateAsync(id, val);
+            let circuit: ICircuit = sys.circuits.getInterfaceById(id, false, { isActive: false });
+            if (isNaN(id)) return Promise.reject(new InvalidEquipmentIdError(`Circuit or Feature id ${id} not valid`, id, 'Circuit'));
+            let circ = state.circuits.getInterfaceById(id, circuit.isActive !== false);
+            let newState = utils.makeBool(val);
+            // First, if we are turning the circuit on, lets determine whether the circuit is a pool or spa circuit and if this is a shared system then we need
+            // to turn off the other body first.
+            //[12, { name: 'pool', desc: 'Pool', hasHeatSource: true }],
+            //[13, { name: 'spa', desc: 'Spa', hasHeatSource: true }]
+            let func = sys.board.valueMaps.circuitFunctions.get(circuit.type);
+            if (newState && (func.name === 'pool' || func.name === 'spa') && sys.equipment.shared === true) {
+                // If we are shared we need to turn off the other circuit.
+                let offType = func.name === 'pool' ? sys.board.valueMaps.circuitFunctions.getValue('spa') : sys.board.valueMaps.circuitFunctions.getValue('pool');
+                let off = sys.circuits.get().filter(elem => elem.type === offType);
+                // Turn the circuits off that are part of the shared system.  We are going back to the board
+                // just in case we got here for a circuit that isn't on the current defined panel.
+                for (let i = 0; i < off.length; i++) {
+                    let coff = off[i];
+                    await sys.board.circuits.setCircuitStateAsync(coff.id, false);
+                }
+            }
+            if (id === 6) state.temps.bodies.getItemById(1, true).isOn = val;
+            else if (id === 1) state.temps.bodies.getItemById(2, true).isOn = val;
+            // Let the main nixie controller set the circuit state and affect the relays if it needs to.
+            await ncp.circuits.setCircuitStateAsync(circ, newState);
+            await sys.board.syncEquipmentItems();
+            return state.circuits.getInterfaceById(circ.id);
+        }
+        catch (err) { return Promise.reject(`Nixie: Error setCircuitStateAsync ${err.message}`); }
+        finally {
+            ncp.pumps.syncPumpStates();
+            sys.board.suspendStatus(false);
+            state.emitEquipmentChanges();
+        }
     }
-  }
-  public async toggleCircuitStateAsync(id: number): Promise<ICircuitState> {
-    let circ = state.circuits.getInterfaceById(id);
-    return await this.setCircuitStateAsync(id, !(circ.isOn || false));
-  }
-  public async setLightThemeAsync(id: number, theme: number) {
-    let cstate = state.circuits.getItemById(id);
-    let circ = sys.circuits.getItemById(id);
-    let thm = sys.board.valueMaps.lightThemes.findItem(theme);
-    if (typeof thm !== 'undefined' && typeof thm.sequence !== 'undefined' && circ.master === 1) {
-      await sys.board.circuits.setCircuitStateAsync(id, true);
-      await ncp.circuits.sendOnOffSequenceAsync(id, thm.sequence);
+    public async toggleCircuitStateAsync(id: number): Promise<ICircuitState> {
+        let circ = state.circuits.getInterfaceById(id);
+        return await this.setCircuitStateAsync(id, !(circ.isOn || false));
     }
-    cstate.lightingTheme = theme;
-    return Promise.resolve(cstate as ICircuitState);
-  }
+    public async runLightGroupCommandAsync(obj: any): Promise<ICircuitState> {
+        // Do all our validation.
+        try {
+            let id = parseInt(obj.id, 10);
+            let cmd = typeof obj.command !== 'undefined' ? sys.board.valueMaps.lightGroupCommands.findItem(obj.command) : { val: 0, name: 'undefined' };
+            if (cmd.val === 0) return Promise.reject(new InvalidOperationError(`Light group command ${cmd.name} does not exist`, 'runLightGroupCommandAsync'));
+            if (isNaN(id)) return Promise.reject(new InvalidOperationError(`Light group ${id} does not exist`, 'runLightGroupCommandAsync'));
+            let grp = sys.lightGroups.getItemById(id);
+            let nop = sys.board.valueMaps.circuitActions.getValue(cmd.name);
+            let sgrp = state.lightGroups.getItemById(grp.id);
+            sgrp.action = nop;
+            sgrp.emitEquipmentChange();
+            // So here we are now we can run the command against all lights in the group that match the command so get a list of the lights.
+            let arrCircs = [];
+            for (let i = 0; i < grp.circuits.length; i++) {
+                let circ = sys.circuits.getItemById(grp.circuits.getItemByIndex(i).circuit);
+                let type = sys.board.valueMaps.circuitFunctions.transform(circ.type);
+                if (type.isLight && cmd.types.includes(type.theme)) arrCircs.push(circ);
+            }
+            // So now we should hav a complete list of the lights that are part of the command list so start them off on their sequence.  We want all the lights
+            // to be doing their thing at the same time so in the lieu of threads we will ceate a promise all.
+            let proms = [];
+            for (let i = 0; i < arrCircs.length; i++) {
+                await ncp.circuits.sendOnOffSequenceAsync(arrCircs[i].id, cmd.sequence);
+                //proms.push(ncp.circuits.sendOnOffSequenceAsync(arrCircs[i].id, cmd.sequence));
+            }
+            for (let i = 0; i < arrCircs.length; i++) {
+                await sys.board.circuits.setCircuitStateAsync(arrCircs[i].id, false);
+                //proms.push(ncp.circuits.sendOnOffSequenceAsync(arrCircs[i].id, cmd.sequence));
+            }
+            await utils.sleep(10000);
+            for (let i = 0; i < arrCircs.length; i++) {
+                await sys.board.circuits.setCircuitStateAsync(arrCircs[i].id, true);
+                //proms.push(ncp.circuits.sendOnOffSequenceAsync(arrCircs[i].id, cmd.sequence));
+            }
+
+            //if (proms.length > 0) {
+            //    //await Promise.all(proms);
+            //    // Let it simmer for 6 seconds then turn it off and back on.
+            //    proms.length = 0;
+            //    for (let i = 0; i < arrCircs.length; i++) {
+            //        proms.push(sys.board.circuits.setCircuitStateAsync(arrCircs[i].id, false));
+            //    }
+            //    await Promise.all(proms);
+            //    // Let it be off for 3 seconds then turn it back on.
+            //    await utils.sleep(10000);
+            //    proms.length = 0;
+            //    for (let i = 0; i < arrCircs.length; i++) {
+            //        proms.push(sys.board.circuits.setCircuitStateAsync(arrCircs[i].id, true));
+            //    }
+            //    await Promise.all(proms);
+            //}
+            sgrp.action = 0;
+            sgrp.emitEquipmentChange();
+            return state.lightGroups.getItemById(id);
+        }
+        catch (err) { return Promise.reject(`Error runLightGroupCommandAsync ${err.message}`); }
+    }
+    public async runLightCommandAsync(obj: any): Promise<ICircuitState> {
+        // Do all our validation.
+        try {
+            let id = parseInt(obj.id, 10);
+            let cmd = typeof obj.command !== 'undefined' ? sys.board.valueMaps.lightCommands.findItem(obj.command) : { val: 0, name: 'undefined' };
+            if (cmd.val === 0) return Promise.reject(new InvalidOperationError(`Light command ${cmd.name} does not exist`, 'runLightCommandAsync'));
+            if (isNaN(id)) return Promise.reject(new InvalidOperationError(`Light ${id} does not exist`, 'runLightCommandAsync'));
+            let circ = sys.circuits.getItemById(id);
+            if (!circ.isActive) return Promise.reject(new InvalidOperationError(`Light circuit #${id} is not active`, 'runLightCommandAsync'));
+            let type = sys.board.valueMaps.circuitFunctions.transform(circ.type);
+            if (!type.isLight) return Promise.reject(new InvalidOperationError(`Circuit #${id} is not a light`, 'runLightCommandAsync'));
+            let nop = sys.board.valueMaps.circuitActions.getValue(cmd.name);
+            let slight = state.circuits.getItemById(circ.id);
+            slight.action = nop;
+            console.log(nop);
+            slight.emitEquipmentChange();
+            await ncp.circuits.sendOnOffSequenceAsync(circ.id, cmd.sequence);
+            await utils.sleep(7000);
+            await sys.board.circuits.setCircuitStateAsync(circ.id, false);
+            await sys.board.circuits.setCircuitStateAsync(circ.id, true);
+            slight.action = 0;
+            slight.emitEquipmentChange();
+            return slight;
+        }
+        catch (err) { return Promise.reject(`Error runLightCommandAsync ${err.message}`); }
+    }
+    public async setLightThemeAsync(id: number, theme: number): Promise<ICircuitState> {
+        let cstate = state.circuits.getItemById(id);
+        let circ = sys.circuits.getItemById(id);
+        let thm = sys.board.valueMaps.lightThemes.findItem(theme);
+        let nop = sys.board.valueMaps.circuitActions.getValue('lighttheme');
+        cstate.action = nop;
+        cstate.emitEquipmentChange();
+        try {
+            if (typeof thm !== 'undefined' && typeof thm.sequence !== 'undefined' && circ.master === 1) {
+                await sys.board.circuits.setCircuitStateAsync(id, true);
+                await ncp.circuits.sendOnOffSequenceAsync(id, thm.sequence);
+            }
+            cstate.lightingTheme = theme;
+            return cstate;
+        } catch (err) { return Promise.reject(new InvalidOperationError(err.message, 'setLightThemeAsync')); }
+        finally { cstate.action = 0; cstate.emitEquipmentChange(); }
+    }
+    public async setColorHoldAsync(id: number): Promise<ICircuitState> {
+        try {
+            let circ = sys.circuits.getItemById(id);
+            if (!circ.isActive) return Promise.reject(new InvalidEquipmentIdError(`Invalid circuit id ${id}`, id, 'circuit'));
+            let cstate = state.circuits.getItemById(circ.id);
+            let cmd = sys.board.valueMaps.lightCommands.findItem('colorhold');
+            await sys.board.circuits.setCircuitStateAsync(id, true);
+            if (circ.master === 1) await ncp.circuits.sendOnOffSequenceAsync(id, cmd.sequence);
+            return cstate;
+        }
+        catch (err) { return Promise.reject(`Nixie: Error setColorHoldAsync ${err.message}`); }
+    }
+    public async setColorRecallAsync(id: number): Promise<ICircuitState> {
+        try {
+            let circ = sys.circuits.getItemById(id);
+            if (!circ.isActive) return Promise.reject(new InvalidEquipmentIdError(`Invalid circuit id ${id}`, id, 'circuit'));
+            let cstate = state.circuits.getItemById(circ.id);
+            let cmd = sys.board.valueMaps.lightCommands.findItem('colorrecall');
+            await sys.board.circuits.setCircuitStateAsync(id, true);
+            if (circ.master === 1) await ncp.circuits.sendOnOffSequenceAsync(id, cmd.sequence);
+            return cstate;
+        }
+        catch (err) { return Promise.reject(`Nixie: Error setColorHoldAsync ${err.message}`); }
+    }
+    public async setLightThumperAsync(id: number): Promise<ICircuitState> { return state.circuits.getItemById(id); }
+
   public setDimmerLevelAsync(id: number, level: number): Promise<ICircuitState> {
     let circ = state.circuits.getItemById(id);
     circ.level = level;
@@ -2250,7 +2559,11 @@ export class CircuitCommands extends BoardCommands {
     return arrRefs;
   }
   public getLightThemes(type?: number) { return sys.board.valueMaps.lightThemes.toArray(); }
-  public getCircuitFunctions() { return sys.board.valueMaps.circuitFunctions.toArray(); }
+    public getCircuitFunctions() {
+        let cf = sys.board.valueMaps.circuitFunctions.toArray();
+        if (!sys.equipment.shared) cf = cf.filter(x => { return x.name !== 'spillway' && x.name !== 'spadrain' });
+        return cf;
+    }
   public getCircuitNames() { return [...sys.board.valueMaps.circuitNames.toArray(), ...sys.board.valueMaps.customNames.toArray()]; }
   public async setCircuitAsync(data: any): Promise<ICircuit> {
     try {
@@ -2529,21 +2842,21 @@ export class CircuitCommands extends BoardCommands {
     }
     catch (err) { return Promise.reject(err); }
   }
-  public sequenceLightGroupAsync(id: number, operation: string): Promise<LightGroupState> {
-    let sgroup = state.lightGroups.getItemById(id);
-    let nop = sys.board.valueMaps.intellibriteActions.getValue(operation);
-    if (nop > 0) {
-      sgroup.action = nop;
-      sgroup.hasChanged = true; // Say we are dirty but we really are pure as the driven snow.
-      state.emitEquipmentChanges();
-      setTimeout(function () {
-        sgroup.action = 0;
-        sgroup.hasChanged = true; // Say we are dirty but we really are pure as the driven snow.
-        state.emitEquipmentChanges();
-      }, 20000); // It takes 20 seconds to sequence.
+    public async sequenceLightGroupAsync(id: number, operation: string): Promise<LightGroupState> {
+        let sgroup = state.lightGroups.getItemById(id);
+        // This is the default action which really does nothing.
+        try {
+            let nop = sys.board.valueMaps.circuitActions.getValue(operation);
+            if (nop > 0) {
+                sgroup.action = nop;
+                sgroup.emitEquipmentChange();
+                await utils.sleep(10000);
+                sgroup.action = 0;
+                state.emitAllEquipmentChanges();
+            }
+            return sgroup;
+        } catch (err) { return Promise.reject(new InvalidOperationError(`Error sequencing light group ${err.message}`, 'sequenceLightGroupAsync')); }
     }
-    return Promise.resolve(sgroup);
-  }
   public async setCircuitGroupStateAsync(id: number, val: boolean): Promise<ICircuitGroupState> {
     let grp = sys.circuitGroups.getItemById(id, false, { isActive: false });
     logger.info(`Setting Circuit Group State`);
@@ -2631,8 +2944,85 @@ export class CircuitCommands extends BoardCommands {
       logger.error(`Error setting end time for ${thing.id}: ${err}`)
     }
   }
+    public async turnOffDrainCircuits(ignoreDelays: boolean) {
+        try {
+            {
+                let drt = sys.board.valueMaps.circuitFunctions.getValue('spadrain');
+                let drains = sys.circuits.filter(x => { return x.type === drt });
+                for (let i = 0; i < drains.length; i++) {
+                    let drain = drains.getItemByIndex(i);
+                    let sdrain = state.circuits.getItemById(drain.id);
+                    if (sdrain.isOn) await sys.board.circuits.setCircuitStateAsync(drain.id, false, ignoreDelays);
+                    sdrain.startDelay = false;
+                    sdrain.stopDelay = false;
+                }
+            }
+            {
+                let drt = sys.board.valueMaps.featureFunctions.getValue('spadrain');
+                let drains = sys.features.filter(x => { return x.type === drt });
+                for (let i = 0; i < drains.length; i++) {
+                    let drain = drains.getItemByIndex(i);
+                    let sdrain = state.features.getItemById(drain.id);
+                    if (sdrain.isOn) await sys.board.features.setFeatureStateAsync(drain.id, false, ignoreDelays);
+                }
+            }
+
+        } catch (err) { return Promise.reject(new BoardProcessError(`turnOffDrainCircuits: ${err.message}`)); }
+    }
+    public async turnOffCleanerCircuits(bstate: BodyTempState, ignoreDelays?: boolean) {
+        try {
+            // First we have to get all the cleaner circuits that are associated with the
+            // body.  To do this we get the circuit functions for all cleaner types associated with the body.
+            //
+            // Cleaner ciruits can always be turned off.  However, they cannot always be turned on.
+            let arrTypes = sys.board.valueMaps.circuitFunctions.toArray().filter(x => { return x.name.indexOf('cleaner') !== -1 && x.body === bstate.id; });
+            let cleaners = sys.circuits.filter(x => { return arrTypes.findIndex(t => { return t.val === x.type }) !== -1 });
+            // So now we should have all the cleaner circuits so lets make sure they are off.
+            for (let i = 0; i < cleaners.length; i++) {
+                let cleaner = cleaners.getItemByIndex(i);
+                if (cleaner.isActive) {
+                    let cstate = state.circuits.getItemById(cleaner.id, true);
+                    if (cstate.isOn || cstate.startDelay) await sys.board.circuits.setCircuitStateAsync(cleaner.id, false, ignoreDelays);
+                }
+            }
+        } catch (err) { return Promise.reject(new BoardProcessError(`turnOffCleanerCircuits: ${err.message}`)); }
+    }
+    public async turnOffSpillwayCircuits(ignoreDelays?: boolean) {
+        try {
+            {
+                let arrTypes = sys.board.valueMaps.circuitFunctions.toArray().filter(x => { return x.name.indexOf('spillway') !== -1 });
+                let spillways = sys.circuits.filter(x => { return arrTypes.findIndex(t => { return t.val === x.type }) !== -1 });
+                // So now we should have all the cleaner circuits so lets make sure they are off.
+                for (let i = 0; i < spillways.length; i++) {
+                    let spillway = spillways.getItemByIndex(i);
+                    if (spillway.isActive) {
+                        let cstate = state.circuits.getItemById(spillway.id, true);
+                        if (cstate.isOn || cstate.startDelay) await sys.board.circuits.setCircuitStateAsync(spillway.id, false, ignoreDelays);
+                    }
+                }
+            }
+            {
+                let arrTypes = sys.board.valueMaps.featureFunctions.toArray().filter(x => { return x.name.indexOf('spillway') !== -1 });
+                let spillways = sys.features.filter(x => { return arrTypes.findIndex(t => { return t.val === x.type }) !== -1 });
+                // So now we should have all the cleaner features so lets make sure they are off.
+                for (let i = 0; i < spillways.length; i++) {
+                    let spillway = spillways.getItemByIndex(i);
+                    if (spillway.isActive) {
+                        let cstate = state.features.getItemById(spillway.id, true);
+                        if (cstate.isOn) await sys.board.features.setFeatureStateAsync(spillway.id, false, ignoreDelays);
+                    }
+                }
+            }
+        } catch (err) { return Promise.reject(new BoardProcessError(`turnOffSpillwayCircuits: ${err.message}`)); }
+    }
 }
 export class FeatureCommands extends BoardCommands {
+    public getFeatureFunctions() {
+        let cf = sys.board.valueMaps.featureFunctions.toArray();
+        if (!sys.equipment.shared) cf = cf.filter(x => { return x.name !== 'spillway' && x.name !== 'spadrain' });
+        return cf;
+    }
+
   public async restore(rest: { poolConfig: any, poolState: any }, ctx: any, res: RestoreResults): Promise<boolean> {
     try {
       // First delete the features that should be removed.
@@ -2727,7 +3117,7 @@ export class FeatureCommands extends BoardCommands {
     else
       Promise.reject(new InvalidEquipmentIdError('Feature id has not been defined', undefined, 'Feature'));
   }
-  public async setFeatureStateAsync(id: number, val: boolean): Promise<ICircuitState> {
+  public async setFeatureStateAsync(id: number, val: boolean, ignoreDelays?: boolean): Promise<ICircuitState> {
     try {
       if (isNaN(id)) return Promise.reject(new InvalidEquipmentIdError(`Invalid feature id: ${id}`, id, 'Feature'));
       if (!sys.board.equipmentIds.features.isInRange(id)) return Promise.reject(new InvalidEquipmentIdError(`Invalid feature id: ${id}`, id, 'Feature'));
@@ -3197,7 +3587,7 @@ export class HeaterCommands extends BoardCommands {
                 try {
                     // pull a little trick to first add the data then perform the update.  This way we won't get a new id or
                     // it won't error out.
-                    sys.heaters.getItemById(h, true);
+                    sys.heaters.getItemById(h.id, true);
                     await sys.board.heaters.setHeaterAsync(h);
                     res.addModuleSuccess('heater', `Add: ${h.id}-${h.name}`);
                 } catch (err) { res.addModuleError('heater', `Add: ${h.id}-${h.name}: ${err.message}`); }
@@ -3224,7 +3614,18 @@ export class HeaterCommands extends BoardCommands {
             return ctx;
         } catch (err) { logger.error(`Error validating heaters for restore: ${err.message}`); }
     }
-
+    public getHeatersByCircuitId(circuitId: number): Heater[] {
+        let heaters: Heater[] = [];
+        let bodyId = circuitId === 6 ? 1 : circuitId === 1 ? 2 : 0;
+        if (bodyId > 0) {
+            for (let i = 0; i < sys.heaters.length; i++) {
+                let heater = sys.heaters.getItemByIndex(i);
+                if (!heater.isActive) continue;
+                if (bodyId === heater.body || sys.equipment.shared && heater.body === 32) heaters.push(heater);
+            }
+        }
+        return heaters;
+    }
     public getInstalledHeaterTypes(body?: number): any {
         let heaters = sys.heaters.get();
         let types = sys.board.valueMaps.heaterTypes.toArray();
@@ -3469,48 +3870,58 @@ export class HeaterCommands extends BoardCommands {
                 let body: BodyTempState = bodies[i];
                 let cfgBody: Body = sys.bodies.getItemById(body.id);
                 let isHeating = false;
+                let isCooling = false;
+                let hstatus = sys.board.valueMaps.heatStatus.getName(body.heatStatus);
+                let mode = sys.board.valueMaps.heatModes.getName(body.heatMode);
                 if (body.isOn) {
                     if (typeof body.temp === 'undefined' && heaters.length > 0) logger.warn(`The body temperature for ${body.name} cannot be determined. Heater status for this body cannot be calculated.`);
+                    // Now get all the heaters associated with the body in an array.
+                    let bodyHeaters: Heater[] = [];
                     for (let j = 0; j < heaters.length; j++) {
                         let heater: Heater = heaters[j];
                         if (heater.isActive === false) continue;
-                        let isOn = false;
-                        let isCooling = false;
-                        let sensorTemp = state.temps.waterSensor1;
-                        if (body.id === 4) sensorTemp = state.temps.waterSensor4;
-                        if (body.id === 3) sensorTemp = state.temps.waterSensor3;
-                        if (body.id === 2 && !sys.equipment.shared) sensorTemp = state.temps.waterSensor2;
-
-                        // Determine whether the heater can be used on this body.
-                        let isAssociated = false;
-                        let b = sys.board.valueMaps.bodies.transform(heater.body);
-                        switch (b.name) {
-                            case 'body1':
-                            case 'pool':
-                                if (body.id === 1) isAssociated = true;
-                                break;
-                            case 'body2':
-                            case 'spa':
-                                if (body.id === 2) isAssociated = true;
-                                break;
-                            case 'poolspa':
-                                if (body.id === 1 || body.id === 2) isAssociated = true;
-                                break;
-                            case 'body3':
-                                if (body.id === 3) isAssociated = true;
-                                break;
-                            case 'body4':
-                                if (body.id === 4) isAssociated = true;
-                                break;
+                        if (heater.body === body.id) bodyHeaters.push(heater);
+                        else {
+                            let b = sys.board.valueMaps.bodies.transform(heater.body);
+                            switch (b.name) {
+                                case 'body1':
+                                case 'pool':
+                                    if (body.id === 1) bodyHeaters.push(heater);
+                                    break;
+                                case 'body2':
+                                case 'spa':
+                                    if (body.id === 2) bodyHeaters.push(heater);
+                                    break;
+                                case 'poolspa':
+                                    if (body.id === 1 || body.id === 2) bodyHeaters.push(heater);
+                                    break;
+                                case 'body3':
+                                    if (body.id === 3) bodyHeaters.push(heater);
+                                    break;
+                                case 'body4':
+                                    if (body.id === 4) bodyHeaters.push(heater);
+                                    break;
+                            }
                         }
-                        // logger.silly(`Heater ${heater.name} is ${isAssociated === true ? '' : 'not '}associated with ${body.name}`);
-                        if (isAssociated) {
-                            let htype = sys.board.valueMaps.heaterTypes.transform(heater.type);
-                            let status = sys.board.valueMaps.heatStatus.transform(body.heatStatus);
-                            let hstate = state.heaters.getItemById(heater.id, true);
-                            if (heater.master === 1) {
+                    }
+                    // Alright we have all the body heaters so sort them in a way that will make our heater preferences work.  Solar, heatpumps, and ultratemp should be in the list first
+                    // so that if we have a heater preference set up then we do not have to evaluate the other heater.
+                    let heaterTypes = sys.board.valueMaps.heaterTypes;
+                    bodyHeaters.sort((a, b) => {
+                        if (heaterTypes.transform(a.type).hasPreference) return -1;
+                        else if (heaterTypes.transform(b.type).hasPreference) return 1;
+                        return 0;
+                    });
+
+                    // Alright so now we should have a sorted array that has preference type heaters first.
+                    for (let j = 0; j < bodyHeaters.length; j++) {
+                        let heater: Heater = bodyHeaters[j];
+                        let isOn = false;
+                        let htype = sys.board.valueMaps.heaterTypes.transform(heater.type);
+                        let hstate = state.heaters.getItemById(heater.id, true);
+                        if (heater.master === 1) {
+                            if (hstatus !== 'cooldown') {
                                 // We need to do our own calculation as to whether it is on.  This is for Nixie heaters.
-                                let mode = sys.board.valueMaps.heatModes.getName(body.heatMode);
                                 switch (htype.name) {
                                     case 'solar':
                                         if (mode === 'solar' || mode === 'solarpref') {
@@ -3531,48 +3942,77 @@ export class HeaterCommands extends BoardCommands {
                                         }
                                         break;
                                     case 'ultratemp':
-                                        // We need to determine whether we are going to use the air temp or the solar temp
-                                        // for the sensor.
-                                        let deltaTemp = Math.max(state.temps.air, state.temps.solar || 0);
+                                        // There is a temperature differential setting on UltraTemp.  This is how
+                                        // much the water temperature needs to drop below the set temperature, for the heater
+                                        // to start up again.  For instance, if the set temperature and the water temperature is 82 and then the
+                                        // heater will shut off and not turn on again until the water temperature = setpoint - differentialTemperature.
+                                        // This is the default operation on IntelliCenter and it appears to simply not start on the setpoint.  We can do better
+                                        // than this by heating 1 degree past the setpoint then applying this rule for 30 minutes.  This allows for a more
+                                        // responsive heater.
+                                        // 
+                                        // For Ultratemp we need to determine whether the differential temp
+                                        // is within range.  The other thing that needs to be calculated here is
+                                        // whether Ultratemp can effeciently heat the pool.
                                         if (mode === 'ultratemp' || mode === 'ultratemppref') {
-                                            if (body.temp < cfgBody.heatSetpoint &&
-                                                deltaTemp > body.temp + heater.differentialTemp || 0) {
-                                                isOn = true;
-                                                body.heatStatus = sys.board.valueMaps.heatStatus.getValue('hpheat');
-                                                isHeating = true;
-                                                isCooling = false;
+                                            if (hstate.isOn) {
+                                                // For the preference mode we will try to reach the setpoint for a period of time then
+                                                // switch over to the gas heater.  Our algorithm for this is to check the rate of
+                                                // change when the heater first kicks on.  If we go for longer than an hour and still
+                                                // haven't reached the setpoint then we will switch to gas.
+                                                if (mode === 'ultratemppref' &&
+                                                    typeof hstate.startTime !== 'undefined' &&
+                                                    hstate.startTime.getTime() < new Date().getTime() - (60 * 60 * 1000))
+                                                    break;
+                                                // If the heater is already on we will heat to 1 degree past the setpoint.
+                                                if (body.temp - 1 < cfgBody.heatSetpoint) {
+                                                    isOn = true;
+                                                    body.heatStatus = sys.board.valueMaps.heatStatus.getValue('hpheat');
+                                                    isHeating = true;
+                                                    isCooling = false;
+                                                }
+                                                else if (body.temp + 1 > cfgBody.coolSetpoint && heater.coolingEnabled) {
+                                                    isOn = true;
+                                                    body.heatStatus = sys.board.valueMaps.heatStatus.getValue('hpcool');
+                                                    isHeating = false;
+                                                    isCooling = true;
+                                                }
                                             }
-                                            else if (body.temp > cfgBody.coolSetpoint && heater.coolingEnabled) {
-                                                isOn = true;
-                                                body.heatStatus = sys.board.valueMaps.heatStatus.getValue('hpcool');
-                                                isHeating = true;
-                                                isCooling = true;
+                                            else {
+                                                let delayStart = typeof hstate.endTime !== 'undefined' ? (hstate.endTime.getTime() + (30 * 60 * 1000)) > new Date().getTime() : false;
+                                                // The heater is not currently on lets turn it on if we pass all the criteria.
+                                                if ((body.temp < cfgBody.heatSetpoint && !delayStart)
+                                                    || body.temp + heater.differentialTemp < cfgBody.heatSetpoint) {
+                                                    isOn = true;
+                                                    body.heatStatus = sys.board.valueMaps.heatStatus.getValue('hpheat');
+                                                    isHeating = true;
+                                                    isCooling = false;
+                                                }
+                                                else if (body.temp > cfgBody.coolSetpoint && heater.coolingEnabled) {
+                                                    if (!delayStart || body.temp - heater.differentialTemp > cfgBody.coolSetpoint) {
+                                                        isOn = true;
+                                                        body.heatStatus = sys.board.valueMaps.heatStatus.getValue('hpcool');
+                                                        isHeating = false;
+                                                        isCooling = true;
+                                                    }
+                                                }
                                             }
                                         }
                                         break;
                                     case 'mastertemp':
-                                        if (mode === 'mtheater') {
+                                        // If we make it here, the other heater is not heating the body.
+                                        if (mode === 'mtheater' || mode === 'heatpumppref' || mode === 'ultratemppref' || mode === 'solarpref') {
                                             if (body.temp < cfgBody.setPoint) {
                                                 isOn = true;
-                                                body.heatStatus = sys.board.valueMaps.heaterTypes.getValue('mtheater');
+                                                body.heatStatus = sys.board.valueMaps.heatStatus.getValue('mtheat');
                                                 isHeating = true;
                                             }
                                         }
                                         break;
                                     case 'maxetherm':
                                     case 'gas':
-                                        if (mode === 'heater') {
+                                        // If we make it here, the other heater is not heating the body.
+                                        if (mode === 'heater' || mode === 'solarpref' || mode === 'heatpumppref' || mode === 'ultratemppref') {
                                             if (body.temp < cfgBody.setPoint) {
-                                                isOn = true;
-                                                body.heatStatus = sys.board.valueMaps.heatStatus.getValue('heater');
-                                                isHeating = true;
-                                            }
-                                        }
-                                        else if (mode === 'solarpref' || mode === 'heatpumppref') {
-                                            // If solar should be running gas heater should be off.
-                                            if (body.temp < cfgBody.setPoint &&
-                                                state.temps.solar > body.temp + (hstate.isOn ? heater.stopTempDelta : heater.startTempDelta)) isOn = false;
-                                            else if (body.temp < cfgBody.setPoint) {
                                                 isOn = true;
                                                 body.heatStatus = sys.board.valueMaps.heatStatus.getValue('heater');
                                                 isHeating = true;
@@ -3581,11 +4021,24 @@ export class HeaterCommands extends BoardCommands {
                                         break;
                                     case 'heatpump':
                                         if (mode === 'heatpump' || mode === 'heatpumppref') {
-                                            if (body.temp < cfgBody.setPoint &&
-                                                state.temps.solar > body.temp + (hstate.isOn ? heater.stopTempDelta : heater.startTempDelta)) {
-                                                isOn = true;
-                                                body.heatStatus = sys.board.valueMaps.heatStatus.getValue('heater');
-                                                isHeating = true;
+                                            if (hstate.isOn) {
+                                                // If the heater is already on we will heat to 1 degree past the setpoint.
+                                                if (body.temp - 1 < cfgBody.heatSetpoint) {
+                                                    isOn = true;
+                                                    body.heatStatus = sys.board.valueMaps.heatStatus.getValue('hpheat');
+                                                    isHeating = true;
+                                                    isCooling = false;
+                                                }
+                                            }
+                                            else {
+                                                // The heater is not currently on lets turn it on if we pass all the criteria.
+                                                if ((body.temp < cfgBody.heatSetpoint && hstate.endTime.getTime() < new Date().getTime() + (30 * 60 * 1000))
+                                                    || body.temp + heater.differentialTemp < cfgBody.heatSetpoint) {
+                                                    isOn = true;
+                                                    body.heatStatus = sys.board.valueMaps.heatStatus.getValue('hpcool');
+                                                    isHeating = true;
+                                                    isCooling = false;
+                                                }
                                             }
                                         }
                                         break;
@@ -3595,46 +4048,61 @@ export class HeaterCommands extends BoardCommands {
                                 }
                                 logger.debug(`Heater Type: ${htype.name} Mode:${mode} Temp: ${body.temp} Setpoint: ${cfgBody.setPoint} Status: ${body.heatStatus}`);
                             }
-                            else {
-                                let mode = sys.board.valueMaps.heatModes.getName(body.heatMode);
-                                switch (htype.name) {
-                                    case 'mastertemp':
-                                        if (status === 'mtheater') isHeating = isOn = true;
-                                        break;
-                                    case 'maxetherm':
-                                    case 'gas':
-                                        if (status === 'heater') isHeating = isOn = true;
-                                        break;
-                                    case 'hybrid':
-                                    case 'ultratemp':
-                                    case 'heatpump':
-                                        if (mode === 'ultratemp' || mode === 'ultratemppref' || mode === 'heatpump' || mode === 'heatpumppref') {
-                                            if (status === 'heater') isHeating = isOn = true;
-                                            else if (status === 'cooling') isCooling = isOn = true;
-                                        }
-                                        break;
-                                    case 'solar':
-                                        if (mode === 'solar' || mode === 'solarpref') {
-                                            if (status === 'solar') isHeating = isOn = true;
-                                            else if (status === 'cooling') isCooling = isOn = true;
-                                        }
-                                        break;
-                                }
-                            }
-                            if (isOn === true && typeof hon.find(elem => elem === heater.id) === 'undefined') {
-                                hon.push(heater.id);
-                                if (heater.master === 1 && isOn) (async () => {
-                                    try {
-                                        await ncp.heaters.setHeaterStateAsync(hstate, isOn, isCooling);
-                                    } catch (err) { logger.error(err.message); }
-                                })();
-                                else hstate.isOn = isOn;
+                        }
+                        else {
+                            let mode = sys.board.valueMaps.heatModes.getName(body.heatMode);
+                            switch (htype.name) {
+                                case 'mastertemp':
+                                    if (hstatus === 'mtheat') isHeating = isOn = true;
+                                    break;
+                                case 'maxetherm':
+                                case 'gas':
+                                    if (hstatus === 'heater') isHeating = isOn = true;
+                                    break;
+                                case 'hybrid':
+                                case 'ultratemp':
+                                case 'heatpump':
+                                    if (mode === 'ultratemp' || mode === 'ultratemppref' || mode === 'heatpump' || mode === 'heatpumppref') {
+                                        if (hstatus === 'heater') isHeating = isOn = true;
+                                        else if (hstatus === 'cooling') isCooling = isOn = true;
+                                    }
+                                    break;
+                                case 'solar':
+                                    if (mode === 'solar' || mode === 'solarpref') {
+                                        if (hstatus === 'solar') isHeating = isOn = true;
+                                        else if (hstatus === 'cooling') isCooling = isOn = true;
+                                    }
+                                    break;
                             }
                         }
+                        if (isOn === true && typeof hon.find(elem => elem === heater.id) === 'undefined') {
+                            hon.push(heater.id);
+                            if (heater.master === 1 && isOn) (async () => {
+                                try {
+                                    hstate.bodyId = body.id;
+                                    if (sys.board.valueMaps.heatStatus.getName(body.heatStatus) === 'cooldown')
+                                        await ncp.heaters.setHeaterStateAsync(hstate, false, false);
+                                    else if (isOn) {
+                                        hstate.bodyId = body.id;
+                                        await ncp.heaters.setHeaterStateAsync(hstate, isOn, isCooling);
+                                    }
+                                    else if (hstate.isOn !== isOn || hstate.isCooling !== isCooling) {
+                                        await ncp.heaters.setHeaterStateAsync(hstate, isOn, isCooling);
+                                    }
+                                } catch (err) { logger.error(err.message); }
+                            })();
+                            else {
+                                hstate.isOn = isOn;
+                                hstate.bodyId = body.id;
+                            }
+                        }
+                        // If there is a heater on for the body we need break out of the loop.  This will make sure for instance a gas heater
+                        // isn't started when one of the more economical methods are.
+                        if (isOn === true) break;
                     }
                 }
-                // When the controller is a virtual one we need to control the heat status ourselves.
-                if (!isHeating && (sys.controllerType === ControllerType.Nixie)) body.heatStatus = 0;
+                if (sys.controllerType === ControllerType.Nixie && !isHeating && !isCooling && hstatus !== 'cooldown') body.heatStatus = sys.board.valueMaps.heatStatus.getValue('off');
+                //else if (sys.controllerType === ControllerType.Nixie) body.heatStatus = 0;
             }
             // Turn off any heaters that should be off.  The code above only turns heaters on.
             for (let i = 0; i < heaters.length; i++) {
@@ -3644,12 +4112,16 @@ export class HeaterCommands extends BoardCommands {
                     if (heater.master === 1) (async () => {
                         try {
                             await ncp.heaters.setHeaterStateAsync(hstate, false, false);
+                            hstate.bodyId = 0;
                         } catch (err) { logger.error(err.message); }
                     })();
-                    else hstate.isOn = false;
+                    else {
+                        hstate.isOn = false;
+                        hstate.bodyId = 0;
+                    }
                 }
             }
-        } catch (err) { logger.error(`Error synchronizing heater states`); }
+        } catch (err) { logger.error(`Error synchronizing heater states: ${err.message}`); }
     }
 }
 export class ValveCommands extends BoardCommands {
@@ -3748,37 +4220,90 @@ export class ValveCommands extends BoardCommands {
     } catch (err) { return Promise.reject(new Error(`Error deleting valve: ${err.message}`)); }
     // The following code will make sure we do not encroach on any valves defined by the OCP.
   }
-  public async syncValveStates() {
-    try {
-      for (let i = 0; i < sys.valves.length; i++) {
-        // Run through all the valves to see whether they should be triggered or not.
-        let valve = sys.valves.getItemByIndex(i);
-        if (valve.isActive) {
-          let vstate = state.valves.getItemById(valve.id, true);
-          let isDiverted = vstate.isDiverted;
-          if (typeof valve.circuit !== 'undefined' && valve.circuit > 0) {
-            if (sys.equipment.shared && valve.isIntake === true)
-              isDiverted = utils.makeBool(state.circuits.getItemById(1).isOn); // If the spa is on then the intake is diverted.
-            else if (sys.equipment.shared && valve.isReturn === true) {
-              // Check to see if there is a spillway circuit or feature on.  If it is on then the return will be diverted no mater what.
-              let spillway = typeof state.circuits.get().find(elem => typeof elem.type !== 'undefined' && elem.type.name === 'spillway' && elem.isOn === true) !== 'undefined' ||
-                typeof state.features.get().find(elem => typeof elem.type !== 'undefined' && elem.type.name === 'spillway' && elem.isOn === true) !== 'undefined';
-              isDiverted = utils.makeBool(spillway || state.circuits.getItemById(1).isOn);
+    public async syncValveStates() {
+        try {
+            // Check to see if there is a drain circuit or feature on.  If it is on then the intake will be diverted no mater what.
+            let drain = sys.equipment.shared ? typeof state.circuits.get().find(elem => typeof elem.type !== 'undefined' && elem.type.name === 'spadrain' && elem.isOn === true) !== 'undefined' ||
+                typeof state.features.get().find(elem => typeof elem.type !== 'undefined' && elem.type.name === 'spadrain' && elem.isOn === true) !== 'undefined' : false;
+            // Check to see if there is a spillway circuit or feature on.  If it is on then the return will be diverted no mater what.
+            let spillway = sys.equipment.shared ? typeof state.circuits.get().find(elem => typeof elem.type !== 'undefined' && elem.type.name === 'spillway' && elem.isOn === true) !== 'undefined' ||
+                typeof state.features.get().find(elem => typeof elem.type !== 'undefined' && elem.type.name === 'spillway' && elem.isOn === true) !== 'undefined' : false;
+            let spa = sys.equipment.shared ? state.circuits.getItemById(1).isOn : false;
+            let pool = sys.equipment.shared ? state.circuits.getItemById(6).isOn : false;
+            // Set the valve mode.
+            if (!sys.equipment.shared) state.valveMode = sys.board.valueMaps.valveModes.getValue('off');
+            else if (drain) state.valveMode = sys.board.valueMaps.valveModes.getValue('spadrain');
+            else if (spillway) state.valveMode = sys.board.valueMaps.valveModes.getValue('spillway');
+            else if (spa) state.valveMode = sys.board.valueMaps.valveModes.getValue('spa');
+            else if (pool) state.valveMode = sys.board.valueMaps.valveModes.getValue('pool');
+            else state.valveMode = sys.board.valueMaps.valveModes.getValue('off');
+
+            for (let i = 0; i < sys.valves.length; i++) {
+                // Run through all the valves to see whether they should be triggered or not.
+                let valve = sys.valves.getItemByIndex(i);
+                if (valve.isActive) {
+                    let vstate = state.valves.getItemById(valve.id, true);
+                    let isDiverted = vstate.isDiverted;
+                    if (typeof valve.circuit !== 'undefined' && valve.circuit > 0) {
+                        if (sys.equipment.shared && valve.isIntake === true) {
+                            // Valve Diverted Positions
+                            // Spa: Y
+                            // Drain: Y
+                            // Spillway: N
+                            // Pool: N
+                            isDiverted = utils.makeBool(spa || drain); // If the spa is on then the intake is diverted.
+                        }
+                        else if (sys.equipment.shared && valve.isReturn === true) {
+                            // Valve Diverted Positions
+                            // Spa: Y
+                            // Drain: N
+                            // Spillway: Y
+                            // Pool: N
+                            isDiverted = utils.makeBool((spa || spillway) && !drain);
+                        }
+                        else {
+                            let circ = state.circuits.getInterfaceById(valve.circuit);
+                            isDiverted = utils.makeBool(circ.isOn);
+                        }
+                    }
+                    else
+                        isDiverted = false;
+                    vstate.type = valve.type;
+                    vstate.name = valve.name;
+                    await sys.board.valves.setValveStateAsync(valve, vstate, isDiverted);
+                }
             }
-            else {
-              let circ = state.circuits.getInterfaceById(valve.circuit);
-              isDiverted = utils.makeBool(circ.isOn);
+        } catch (err) { logger.error(`syncValveStates: Error synchronizing valves ${err.message}`); }
+    }
+    public getBodyValveCircuitIds(isOn?: boolean): number[] {
+        let arrIds: number[] = [];
+        if (sys.equipment.shared !== true) return arrIds;
+
+        {
+            let dtype = sys.board.valueMaps.circuitFunctions.getValue('spadrain');
+            let stype = sys.board.valueMaps.circuitFunctions.getValue('spillway');
+            let ptype = sys.board.valueMaps.circuitFunctions.getValue('pool');
+            let sptype = sys.board.valueMaps.circuitFunctions.getValue('spa');
+            for (let i = 0; i < state.circuits.length; i++) {
+                let cstate = state.circuits.getItemByIndex(i);
+                if (typeof isOn === 'undefined' || cstate.isOn === isOn) {
+                    if (cstate.id === 1 || cstate.id === 6) arrIds.push(cstate.id);
+                    if (cstate.type === dtype || cstate.type === stype || cstate.type === ptype || cstate.type === sptype) arrIds.push(cstate.id);
+                }
             }
-          }
-          else
-            isDiverted = false;
-          vstate.type = valve.type;
-          vstate.name = valve.name;
-          await sys.board.valves.setValveStateAsync(valve, vstate, isDiverted);
         }
-      }
-    } catch (err) { logger.error(`syncValveStates: Error synchronizing valves ${err.message}`); }
-  }
+        {
+            let dtype = sys.board.valueMaps.featureFunctions.getValue('spadrain');
+            let stype = sys.board.valueMaps.featureFunctions.getValue('spillway');
+            for (let i = 0; i < state.features.length; i++) {
+                let fstate = state.features.getItemByIndex(i);
+                if (typeof isOn === 'undefined' || fstate.isOn === isOn) {
+                    if (fstate.type === dtype || fstate.type === stype) arrIds.push(fstate.id);
+                }
+            }
+        }
+        return arrIds;
+    }
 }
 export class ChemControllerCommands extends BoardCommands {
   public async restore(rest: { poolConfig: any, poolState: any }, ctx: any, res: RestoreResults): Promise<boolean> {
@@ -3907,12 +4432,12 @@ export class ChemControllerCommands extends BoardCommands {
   }
 
   // If we land here then this is definitely a non-OCP implementation.  Pass this off to nixie to do her thing.
-  protected async setIntelliChemAsync(data: any): Promise<ChemController> {
-    try {
-      let chem = sys.chemControllers.getItemById(data.id);
-      return await ncp.chemControllers.setControllerAsync(chem, data);
-    } catch (err) { return Promise.reject(err); }
-  }
+    protected async setIntelliChemAsync(data: any): Promise<ChemController> {
+        try {
+            let chem = sys.chemControllers.getItemById(data.id);
+            return chem.master === 1 ? await ncp.chemControllers.setControllerAsync(chem, data) : chem;
+        } catch (err) { return Promise.reject(err); }
+    }
   public findChemController(data: any) {
     let address = parseInt(data.address, 10);
     let id = parseInt(data.id, 10);
@@ -3952,25 +4477,28 @@ export class ChemControllerCommands extends BoardCommands {
             chem.isActive = true;
             // So here is the thing.  If you have an OCP then the IntelliChem must be controlled by that.
             // the messages on the bus will talk back to the OCP so if you do not do this mayhem will ensue.
-            if (type.name === 'intellichem')
-                await this.setIntelliChemAsync(data);
+            if (t.name === 'intellichem') {
+                logger.info(`${chem.name} - ${chem.id} routing IntelliChem to OCP`);
+                await sys.board.chemControllers.setIntelliChemAsync(data);
+            }
             else
                 await ncp.chemControllers.setControllerAsync(chem, data);
             return Promise.resolve(chem);
         }
         catch (err) { return Promise.reject(err); }
     }
-  public async setChemControllerStateAsync(data: any): Promise<ChemControllerState> {
-    // For the most part all of the settable settings for IntelliChem are config settings.  REM is a bit of a different story so that
-    // should map to the ncp
-    let chem = sys.board.chemControllers.findChemController(data);
-    if (typeof chem === 'undefined') return Promise.reject(new InvalidEquipmentIdError(`A valid chem controller could not be found for id:${data.id} or address ${data.address}`, data.id || data.address, 'chemController'));
-    data.id = chem.id;
-    if (chem.master !== 0) await ncp.chemControllers.setControllerAsync(chem, data);
-    else await sys.board.chemControllers.setChemControllerAsync(data);
-    let schem = state.chemControllers.getItemById(chem.id, true);
-    return Promise.resolve(schem);
-  }
+    public async setChemControllerStateAsync(data: any): Promise<ChemControllerState> {
+        // For the most part all of the settable settings for IntelliChem are config settings.  REM is a bit of a different story so that
+        // should map to the ncp
+        let chem = sys.board.chemControllers.findChemController(data);
+        if (typeof chem === 'undefined') return Promise.reject(new InvalidEquipmentIdError(`A valid chem controller could not be found for id:${data.id} or address ${data.address}`, data.id || data.address, 'chemController'));
+        data.id = chem.id;
+        logger.info(`Setting ${chem.name} data ${chem.master}`);
+        if (chem.master === 1) await ncp.chemControllers.setControllerAsync(chem, data);
+        else await sys.board.chemControllers.setChemControllerAsync(data);
+        let schem = state.chemControllers.getItemById(chem.id, true);
+        return Promise.resolve(schem);
+    }
 }
 export class FilterCommands extends BoardCommands {
   public async restore(rest: { poolConfig: any, poolState: any }, ctx: any, res: RestoreResults): Promise<boolean> {
@@ -4023,19 +4551,19 @@ export class FilterCommands extends BoardCommands {
     } catch (err) { logger.error(`Error validating filters for restore: ${err.message}`); }
   }
 
-  public async syncFilterStates() {
-    try {
-      for (let i = 0; i < sys.filters.length; i++) {
-        // Run through all the valves to see whether they should be triggered or not.
-        let filter = sys.filters.getItemByIndex(i);
-        if (filter.isActive && !isNaN(filter.id)) {
-          let fstate = state.filters.getItemById(filter.id, true);
-          // Check to see if the associated body is on.
-          await sys.board.filters.setFilterStateAsync(filter, fstate, sys.board.bodies.isBodyOn(filter.body));
-        }
-      }
-    } catch (err) { logger.error(`syncFilterStates: Error synchronizing filters ${err.message}`); }
-  }
+    public async syncFilterStates() {
+        try {
+            for (let i = 0; i < sys.filters.length; i++) {
+                // Run through all the valves to see whether they should be triggered or not.
+                let filter = sys.filters.getItemByIndex(i);
+                if (filter.isActive && !isNaN(filter.id)) {
+                    let fstate = state.filters.getItemById(filter.id, true);
+                    // Check to see if the associated body is on.
+                    await sys.board.filters.setFilterStateAsync(filter, fstate, sys.board.bodies.isBodyOn(filter.body));
+                }
+            }
+        } catch (err) { logger.error(`syncFilterStates: Error synchronizing filters ${err.message}`); }
+    }
   public async setFilterPressure(id: number, pressure: number, units?: string) {
     try {
       let filter = sys.filters.find(elem => elem.id === id);
