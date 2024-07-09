@@ -3,8 +3,8 @@ name: Publish Docker Image - Ubuntu
 on:
   push:
     branches:
-      - main
       - docker
+      - test
   workflow_dispatch:
     
 jobs:
@@ -14,11 +14,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
     
-      - name: Checkout code from tagyoureit/nodejs-poolcontroller
+      - name: Checkout code from jrhubott/nodejs-poolcontroller
         uses: actions/checkout@v3
         with:
-          repository: tagyoureit/nodejs-poolcontroller
-          ref: master  # or specify the branch or tag to pull from
+          repository: jrhubott/nodejs-poolcontroller
+          ref: test  # or specify the branch or tag to pull from
           path: nodejs-poolcontroller
 
       - name: Checkout code from rstrouse/nodejs-poolcontroller-dashpanel
