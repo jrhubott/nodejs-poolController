@@ -37,6 +37,8 @@ RUN npm run build
 
 # Fourth stage for the final combined image
 FROM node:lts-alpine AS final
+RUN apk add --no-cache tzdata
+RUN ln -s /usr/share/zoneinfo/America/Los_Angeles /etc/localtime
 
 # Install PM2 globally
 RUN npm install pm2 -g
