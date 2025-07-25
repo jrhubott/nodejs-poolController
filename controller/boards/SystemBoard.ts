@@ -582,7 +582,7 @@ export class byteValueMaps {
     public valveModes: byteValueMap = new byteValueMap([
         [0, { name: 'off', desc: 'Off' }],
         [1, { name: 'pool', desc: 'Pool' }],
-        [2, { name: 'spa', dest: 'Spa' }],
+        [2, { name: 'spa', desc: 'Spa' }],
         [3, { name: 'spillway', desc: 'Spillway' }],
         [4, { name: 'spadrain', desc: 'Spa Drain' }]
     ]);
@@ -3631,7 +3631,7 @@ export class ScheduleCommands extends BoardCommands {
         if (heatSetpoint < 0 || heatSetpoint > 104) return Promise.reject(new InvalidEquipmentDataError(`Invalid heat setpoint: ${heatSetpoint}`, 'Schedule', heatSetpoint));
         if (sys.board.circuits.getCircuitReferences(true, true, false, true).find(elem => elem.id === circuit) === undefined)
             return Promise.reject(new InvalidEquipmentDataError(`Invalid circuit reference: ${circuit}`, 'Schedule', circuit));
-        if (schedType === 128 && schedDays === 0) return Promise.reject(new InvalidEquipmentDataError(`Invalid schedule days: ${schedDays}. You must supply days that the schedule is to run.`, 'Schedule', schedDays));
+        if (schedType === 128 && schedDays === 0) return Promise.reject(new InvalidEquipmentDataError(`Invalid schedule days: ${schedDays}. You must supply days that the schedule is to run.`, 'Schedule', schedDays)); // rsg 2024.11.22 - some controllers allow no days.
 
         // If we made it to here we are valid and the schedula and it state should exist.
         sched = sys.schedules.getItemById(id, true);
@@ -3656,8 +3656,12 @@ export class ScheduleCommands extends BoardCommands {
         ssched.display = sched.display = display;
         ssched.startTimeOffset = sched.startTimeOffset = startTimeOffset;
         ssched.endTimeOffset = sched.endTimeOffset = endTimeOffset;
-        if (typeof sched.startDate === 'undefined')
+        // Nixie controller managing schedules (master = 1), physical OCP (master = 0)
+        if (sys.controllerType === ControllerType.Nixie) {
             sched.master = 1;
+        } else {
+            sched.master = 0;
+        }
         await ncp.schedules.setScheduleAsync(sched, data);
         // update end time in case sched is changed while circuit is on
         let cstate = state.circuits.getInterfaceById(sched.circuit);

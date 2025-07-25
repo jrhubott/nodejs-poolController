@@ -1089,12 +1089,14 @@ export class ScheduleStateCollection extends EqStateCollection<ScheduleState> {
             let ssched = this.getItemByIndex(i);
             let st = ssched.scheduleTime;
             let sched = sys.schedules.getItemById(ssched.id);
-            if (!sched.isActive || ssched.disabled) {
+            // rsg st.startTime is null when the schedule has No Days  <-- WRONG.  ssched.scheduleDays should be checked.
+            // original fix #879;  updated fix #1033
+            if (!sched.isActive || ssched.disabled || ssched.scheduleDays === 0) {
                 continue;
             }
             st.calcSchedule(state.time, sys.schedules.getItemById(ssched.id));
             if (typeof st.startTime === 'undefined') continue;
-            if (ssched.isOn || st.shouldBeOn || st.startTime.getTime() > new Date().getTime()) activeScheds.push(ssched);
+            if (ssched.isOn || st.shouldBeOn || (st.startTime && st.startTime.getTime() > new Date().getTime())) activeScheds.push(ssched);
         }
         return activeScheds;
     }
@@ -1254,7 +1256,7 @@ export class ScheduleTime extends ChildEqState {
             let dtCalc = typeof this.calculatedDate !== 'undefined' && typeof this.calculatedDate.getTime === 'function' ? new Date(this.calculatedDate.getTime()).setHours(0, 0, 0, 0) : new Date(1970, 0, 1, 0, 0).getTime();
             let recalc = !this.calculated;
             if (!recalc && sod.getTime() !== dtCalc) recalc = true;
-            if (!recalc && (this.endTime.getTime() < new Date().getTime() && this.startTime.getTime() < dtCalc)) {
+            if (!recalc && (this.endTime && this.endTime.getTime() < new Date().getTime() && this.startTime && this.startTime.getTime() < dtCalc)) {
                 recalc = true;
                 logger.info(`Recalculating expired schedule ${sched.id}`);
             }
@@ -2656,74 +2658,6 @@ export class ChemControllerState extends EqState implements IChemControllerState
         if (typeof this.data.siCalcType === 'undefined') {
             this.data.siCalcType = sys.board.valueMaps.siCalcTypes.transform(0);
         }
-        //var chemControllerState = {
-        //    lastComm: 'number',             // The unix time the chem controller sent its status.
-        //    id: 'number',                   // Id of the chemController.
-        //    type: 'valueMap',               // intellichem, rem.
-        //    address: 'number',              // Assigned address if IntelliChem.
-        //    name: 'string',                 // Name assigned to the controller.
-        //    status: 'valueMap',             // ok, nocomms, setupError
-        //    body: 'valueMap',               // Body that the chemController is assigned to.
-        //    flowDetected: 'boolean',        // True if there is currently sufficient flow to read and dose.
-        //    flowDelay: 'boolean',           // True of the controller is currently under a flow delay.
-        //    firmware: 'string',             // Firmware version from IntelliChem (this should be in config)
-        //    saturationIndex: 'number',      // Calculated LSI for the body.
-        //    isActive: 'boolean',    
-        //    alarms: {},                     // This has not changed although additional alarms will be added.
-        //    warnings: {},                   // This has not changed although additional warnings will be added.
-        //    chemistryStatus: 'valueMap',    // Current water quality status.
-        //    ph: {
-        //        chemType: 'string',                 // Constant ph.
-        //        dosingTimeRemaining: 'number',      // The number of seconds remaining for the current dose.
-        //        dosingVolumeRemaining: 'number',    // Remaining volume for the current dose in mL.
-        //        mixTimeRemaining: 'number',         // The number of seconds remaining in the current mix cycle.
-        //        dosingStatus: 'valueMap',           // dosing, monitoring, mixing.
-        //        level: 'number',                    // The current pH level.
-        //        lockout: 'boolean',                 // True if an attempt to dose was thwarted by error.
-        //        manualDosing: 'boolean',            // True if the pump is running outside of a dosing command.
-        //        dailyLimitReached: 'boolean',       // True if the calculated daily limit has been reached based upon body volume.
-        //        pump: {
-        //            type: 'valueMap',               // The defined pump type.
-        //            isDosing: 'boolean',            // True if the pump is running.
-        //        },
-        //        tank: {
-        //            level: 'number',                // The current level for the tank.
-        //            capacity: 'number',             // Total capacity for the tank.
-        //            units: 'valueMap',              // nounits, gal, mL, cL, L, oz, pt, qt.
-        //        },
-        //        probe: {
-        //            level: 'number',                // Current ph level as measured by the probe.
-        //            temperature: 'number',          // The temperature used to calculate the adjusted probe level.
-        //            tempUnits: 'valueMap'           // Units for the temperature C or F.
-        //        }
-        //    },
-        //    orp: {
-        //        chemType: 'string',                 // Constant orp.
-        //        dosingTimeRemaining: 'number',      // The number of seconds remaining for the current dose.
-        //        dosingVolumeRemaining: 'number',    // Remaining volume for the current dose in mL.
-        //        mixTimeRemaining: 'number',         // The number of seconds remaining in the current mix cycle.
-        //        dosingStatus: 'valueMap',           // dosing, monitoring, mixing.
-        //        level: 'number',                    // The current ORP level.
-        //        lockout: 'boolean',                 // True if an attempt to dose was thwarted by error.
-        //        manualDosing: 'boolean',            // True if the pump is running outside of a dosing command.
-        //        dailyLimitReached: 'boolean',       // True if the calculated daily limit has been reached based upon body volume.
-        //        pump: {
-        //            type: 'valueMap',               // The defined pump type.
-        //            isDosing: 'boolean',            // True if the pump is running.
-        //        },
-        //        tank: {
-        //            level: 'number',                // The current level for the tank.
-        //            capacity: 'number',             // Total capacity for the tank.
-        //            units: 'valueMap',              // nounits, gal, mL, cL, L, oz, pt, qt.
-        //        },
-        //        probe: {
-        //            level: 'number',                // Current ORP level as measured by the probe.
-        //            temperature: 'number',          // The temperature used to calculate the adjusted probe level.
-        //            tempUnits: 'valueMap'           // Units for the temperature C or F.
-        //        }
-        //    }
-        //}
-
     }
     public dataName: string = 'chemController';
     public get lastComm(): number { return this.data.lastComm || 0; }
@@ -3173,8 +3107,8 @@ export class ChemicalORPState extends ChemicalState {
     public get chemType() { return 'orp'; }
     public set chemType(val) { this.setDataVal('chemType', val); }
     public get probe() { return new ChemicalProbeORPState(this.data, 'probe', this); }
-    public get useChlorinator(): boolean { return utils.makeBool(this.data.useChlorinator); }
-    public set useChlorinator(val: boolean) { this.setDataVal('useChlorinator', val); }
+    // public get useChlorinator(): boolean { return utils.makeBool(this.data.useChlorinator); }
+    // public set useChlorinator(val: boolean) { this.setDataVal('useChlorinator', val); }
     public get suspendDosing(): boolean {
         let cc = this.chemController;
         return cc.alarms.comms !== 0 || cc.alarms.orpProbeFault !== 0 || cc.alarms.orpPumpFault !== 0 || cc.alarms.bodyFault !== 0;
