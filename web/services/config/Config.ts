@@ -74,7 +74,7 @@ export class ConfigRoute {
                         let cport = extend(true, { enabled: false, netConnect: false, mock: false }, cfg[section]);
                         let port = conn.findPortById(cport.portId || 0);
                         if (typeof cport.type === 'undefined'){
-                            cport.type = cport.netConnect ? 'netConnect' : cport.mockPort || cport.mock ? 'mock' : 'local'
+                            cport.type = cport.netConnect ? 'netConnect' : cport.mock ? 'mock' : 'local'
                         }
                         if (typeof port !== 'undefined') cport.stats = port.stats;
                         if (port.portId === 0 && port.type === 'screenlogic') {
@@ -301,7 +301,8 @@ export class ConfigRoute {
                     // waterFlow: sys.board.valueMaps.chemControllerWaterFlow.toArray(), // remove
                     controllers: sys.chemControllers.get(),
                     maxChemControllers: sys.equipment.maxChemControllers,
-                    doserTypes: sys.board.valueMaps.chemDoserTypes.toArray()
+                    doserTypes: sys.board.valueMaps.chemDoserTypes.toArray(),
+                    chlorinators: sys.chlorinators.get(),
                 };
                 return res.status(200).send(opts);
             }
@@ -1008,7 +1009,7 @@ export class ConfigRoute {
                                     return next(new ServiceProcessError(`File already exists ${req.file.originalname}`, 'POST: app/backup/file', 'writeFile'));
                                 else {
                                     try {
-                                        fs.writeFileSync(bf.filePath, req.file.buffer);
+                                        fs.writeFileSync(bf.filePath, new Uint8Array(req.file.buffer));
                                     } catch (e) { logger.error(`Error writing backup file ${e.message}`); }
                                 }
                                 return res.status(200).send(bf);
